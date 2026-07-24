@@ -26,7 +26,7 @@ path = "src/main.rs"
 # TUI
 ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
 crossterm = "0.29"
-unicode-width = "0.1"
+unicode-width = "0.2"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
