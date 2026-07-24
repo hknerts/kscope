@@ -1,0 +1,70 @@
+[package]
+name = "kscope"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["The kscope contributors"]
+description = "A fast, read-only Kubernetes TUI focused on logs and live metrics"
+repository = "https://github.com/kscope-tui/kscope"
+homepage = "https://github.com/kscope-tui/kscope"
+documentation = "https://docs.rs/kscope"
+license = "MIT"
+readme = "README.md"
+keywords = ["kubernetes", "tui", "logs", "metrics", "observability"]
+categories = ["command-line-utilities"]
+exclude = ["/.github", "/docs", "/assets"]
+
+[lib]
+name = "kscope"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kscope"
+path = "src/main.rs"
+
+[dependencies]
+# TUI
+ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
+unicode-width = "0.1"
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
+futures = "0.3"
+
+# Kubernetes
+kube = { version = "0.93", default-features = false, features = ["client", "config", "rustls-tls", "runtime"] }
+k8s-openapi = { version = "0.22", features = ["v1_30"] }
+
+# Data
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+regex = "1"
+memchr = "2"
+directories = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Fast iteration while still exercising optimised dependency code paths.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.bench]
+inherits = "release"

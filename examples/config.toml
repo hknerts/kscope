@@ -1,0 +1,60 @@
+# kscope configuration
+# Copy to ~/.config/kscope/config.toml (Linux) or
+# ~/Library/Application Support/io.kscope.kscope/config.toml (macOS).
+# Every key is optional; anything omitted keeps its default.
+
+[general]
+# Redraw cap. Lower this on slow terminals or over SSH.
+max_fps = 30
+# Namespace used on start-up. Omit to follow the kubeconfig context.
+# namespace = "payments"
+inventory_refresh_ms = 5000
+mouse = true
+
+[logs]
+# Lines kept in memory per session. 50k lines is roughly 10-15 MB.
+buffer_lines = 50000
+# History requested when attaching to a container.
+tail_lines = 500
+# Ask the API server for RFC3339 timestamps.
+timestamps = false
+follow = true
+wrap = false
+# Searches are case-insensitive unless the query contains an upper-case letter.
+smart_case = true
+
+[metrics]
+refresh_ms = 5000
+# Samples retained per series; also the maximum sparkline width.
+history = 240
+warn_pct = 75.0
+critical_pct = 90.0
+
+[theme]
+# Names ("red", "lightcyan", "darkgray") or hex ("#ff8800").
+fg = "gray"
+accent = "cyan"
+border = "darkgray"
+border_focus = "cyan"
+error = "red"
+warn = "yellow"
+info = "green"
+debug = "blue"
+trace = "darkgray"
+match_fg = "black"
+match_bg = "yellow"
+
+# Extra regex highlight rules, applied on top of the built-in ones.
+[[highlight]]
+pattern = 'trace_id=[a-f0-9]{16,32}'
+fg = "magenta"
+
+[[highlight]]
+pattern = 'order_id=[0-9]+'
+fg = "#ff8800"
+bold = true
+
+[[highlight]]
+pattern = '\b(OOMKilled|CrashLoopBackOff|Evicted)\b'
+fg = "red"
+bold = true
