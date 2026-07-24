@@ -3,6 +3,12 @@
 //! Rendering lives in [`crate::ui`]; this module owns *what* is true and
 //! [`crate::ui`] owns *how it looks*. State changes set `dirty`, and the main
 //! loop redraws at most `general.max_fps` times per second.
+//!
+//! The shape of the UI is two panes: the **contexts** on the left, and on the
+//! right a resource browser. `:` picks the resource *type* (with k9s-style
+//! autocompletion over whatever the cluster's discovery API serves), the
+//! browser lists that type's objects, and `Enter` opens one to inspect its
+//! logs, metrics and events.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -14,24 +20,37 @@ use tokio::sync::mpsc::Sender;
 
 use crate::config::Config;
 use crate::k8s::discovery::{Scope, Update};
+use crate::k8s::events::{EventInfo, EventUpdate};
 use crate::k8s::logs::{LogEvent, StreamSpec};
 use crate::k8s::metrics::MetricsEvent;
+use crate::k8s::resources::{ResourceRow, ResourceType};
 use crate::k8s::{Inventory, PodInfo};
 use crate::logs::{Highlighter, Level, LogBuffer, LogLine};
 use crate::metrics::MetricsStore;
+use crate::palette::Palette;
 
-/// Which of the two tools is on screen.
+/// Which detail tab is on screen for the selected object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Logs,
     Metrics,
+    Events,
 }
 
 /// Which pane has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
-    Sidebar,
-    Content,
+    Contexts,
+    Resources,
+}
+
+/// What the right-hand pane is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightMode {
+    /// Listing objects of the current resource type.
+    Browse,
+    /// Inspecting one object's logs / metrics / events.
+    Detail,
 }
 
 /// Modal text entry.
@@ -41,7 +60,10 @@ pub enum InputMode {
     Search,
     Filter,
     Namespace,
-    PodFilter,
+    /// Free-text filter over the browsed object list.
+    RowFilter,
+    /// The `:` resource-type palette.
+    Command,
     Help,
 }
 
@@ -51,46 +73,9 @@ impl InputMode {
             InputMode::Search => "/",
             InputMode::Filter => "filter (prefix ! to exclude) > ",
             InputMode::Namespace => "namespace > ",
-            InputMode::PodFilter => "pods matching > ",
+            InputMode::RowFilter => "matching > ",
+            InputMode::Command => ":",
             _ => "",
-        }
-    }
-}
-
-/// A row in the resource sidebar.
-#[derive(Debug, Clone)]
-pub enum SidebarItem {
-    /// Header for pods sharing an owning workload (Deployment, StatefulSet,
-    /// DaemonSet, Job, ...). Not itself a pod — `Enter` collapses/expands it.
-    Group {
-        key: String,
-        kind: String,
-        name: String,
-    },
-    Pod {
-        key: String,
-        pod: usize,
-    },
-    Container {
-        key: String,
-        pod: usize,
-        name: String,
-    },
-}
-
-impl SidebarItem {
-    /// `None` for group headers, which have no backing pod.
-    pub fn pod_index(&self) -> Option<usize> {
-        match self {
-            SidebarItem::Pod { pod, .. } | SidebarItem::Container { pod, .. } => Some(*pod),
-            SidebarItem::Group { .. } => None,
-        }
-    }
-    pub fn key(&self) -> &str {
-        match self {
-            SidebarItem::Group { key, .. }
-            | SidebarItem::Pod { key, .. }
-            | SidebarItem::Container { key, .. } => key,
         }
     }
 }
@@ -113,7 +98,7 @@ pub struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
-            text: "welcome to kscope — press ? for help".into(),
+            text: "welcome to kscope — press : to pick a resource, ? for help".into(),
             kind: StatusKind::Info,
             at: Instant::now(),
         }
@@ -162,6 +147,13 @@ pub enum MetricPane {
     Volumes,
 }
 
+/// A kubeconfig context in the left-hand pane.
+#[derive(Debug, Clone)]
+pub struct ContextEntry {
+    pub name: String,
+    pub cluster: String,
+}
+
 pub struct App {
     pub config: Config,
     pub client: kube::Client,
@@ -172,18 +164,46 @@ pub struct App {
     pub user_name: String,
     pub k8s_version: String,
 
+    // ------------------------------------------------------------- contexts
+    pub contexts: Vec<ContextEntry>,
+    pub context_selected: usize,
+    /// Set when the user picks a different context; the main loop notices,
+    /// rebuilds the client and restarts every poller.
+    pub pending_context: Option<String>,
+    /// Set when the namespace scope changes: the pollers are bound to a scope
+    /// at spawn time, so they have to be restarted to follow it.
+    pub pollers_stale: bool,
+
+    // ------------------------------------------------------------ resources
+    /// Every listable kind the cluster serves, from its discovery API.
+    pub resource_types: Vec<ResourceType>,
+    /// Index into `resource_types` of the kind currently browsed.
+    pub current_type: Option<usize>,
+    /// Objects of the current kind.
+    pub rows: Vec<ResourceRow>,
+    /// Indices into `rows` surviving `row_filter`.
+    pub row_view: Vec<usize>,
+    pub row_selected: usize,
+    pub row_filter: Option<String>,
+    pub rows_error: Option<String>,
+    /// Set while a list request is in flight, so the pane can say so.
+    pub loading: bool,
+
+    pub right: RightMode,
     pub view: View,
     pub pane: Pane,
     pub mode: InputMode,
     pub input: String,
+    pub palette: Palette,
 
     pub inventory: Inventory,
-    pub sidebar: Vec<SidebarItem>,
-    pub sidebar_selected: usize,
-    pub sidebar_offset: usize,
-    pub expanded: HashSet<String>,
-    pub collapsed_groups: HashSet<String>,
-    pub pod_filter: Option<String>,
+
+    // --------------------------------------------------------------- events
+    pub events: Vec<EventInfo>,
+    pub event_view: Vec<usize>,
+    pub event_selected: usize,
+    pub warnings_only: bool,
+    pub events_error: Option<String>,
 
     pub buffer: LogBuffer,
     pub highlighter: Highlighter,
@@ -205,6 +225,9 @@ pub struct App {
     pub sort_by: SortBy,
 
     pub attached: Vec<Arc<str>>,
+    /// Key of the object the current streams belong to, so switching rows
+    /// tears the old pod's streams down instead of merging two pods' logs.
+    attached_to: Option<String>,
     streams: HashMap<Arc<str>, tokio::task::JoinHandle<()>>,
     log_tx: Sender<LogEvent>,
 
@@ -215,6 +238,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         client: kube::Client,
@@ -223,10 +247,15 @@ impl App {
         context_name: String,
         user_name: String,
         k8s_version: String,
+        contexts: Vec<ContextEntry>,
     ) -> Self {
         let highlighter = Highlighter::new(&config.theme, &config.highlight);
         let buffer = LogBuffer::new(config.logs.buffer_lines);
         let metrics = MetricsStore::new(config.metrics.history);
+        let context_selected = contexts
+            .iter()
+            .position(|c| c.name == context_name)
+            .unwrap_or(0);
         Self {
             follow: config.logs.follow,
             wrap: config.logs.wrap,
@@ -238,17 +267,30 @@ impl App {
             context_name,
             user_name,
             k8s_version,
+            contexts,
+            context_selected,
+            pending_context: None,
+            pollers_stale: false,
+            resource_types: Vec::new(),
+            current_type: None,
+            rows: Vec::new(),
+            row_view: Vec::new(),
+            row_selected: 0,
+            row_filter: None,
+            rows_error: None,
+            loading: false,
+            right: RightMode::Browse,
             view: View::Logs,
-            pane: Pane::Sidebar,
+            pane: Pane::Resources,
             mode: InputMode::Normal,
             input: String::new(),
+            palette: Palette::default(),
             inventory: Inventory::default(),
-            sidebar: Vec::new(),
-            sidebar_selected: 0,
-            sidebar_offset: 0,
-            expanded: HashSet::new(),
-            collapsed_groups: HashSet::new(),
-            pod_filter: None,
+            events: Vec::new(),
+            event_view: Vec::new(),
+            event_selected: 0,
+            warnings_only: false,
+            events_error: None,
             buffer,
             highlighter,
             scroll: 0,
@@ -262,6 +304,7 @@ impl App {
             volume_selected: 0,
             sort_by: SortBy::Cpu,
             attached: Vec::new(),
+            attached_to: None,
             streams: HashMap::new(),
             log_tx,
             status: Status::default(),
@@ -282,14 +325,191 @@ impl App {
         self.dirty = true;
     }
 
+    // ------------------------------------------------------------- resources
+
+    /// Hand the app the cluster's resource catalogue. Called once after
+    /// connecting, and again after every context switch.
+    pub fn on_resource_types(&mut self, types: Vec<ResourceType>) {
+        let previous = self.current_type().map(|t| t.qualified());
+        self.resource_types = types;
+        // Keep browsing the same kind across a context switch when the new
+        // cluster also serves it; otherwise fall back to pods.
+        self.current_type = previous
+            .and_then(|q| self.resource_types.iter().position(|t| t.qualified() == q))
+            .or_else(|| self.resource_types.iter().position(|t| t.name() == "pods"));
+        self.dirty = true;
+    }
+
+    pub fn current_type(&self) -> Option<&ResourceType> {
+        self.current_type.and_then(|i| self.resource_types.get(i))
+    }
+
+    /// Name of the kind on screen, for titles and the status bar.
+    pub fn resource_label(&self) -> String {
+        self.current_type()
+            .map(|t| t.name())
+            .unwrap_or_else(|| "—".to_string())
+    }
+
+    /// Replace the browsed object list.
+    pub fn on_rows(&mut self, rows: Result<Vec<ResourceRow>, String>) {
+        self.loading = false;
+        match rows {
+            Ok(rows) => {
+                self.rows_error = None;
+                self.rows = rows;
+                self.rebuild_row_view();
+            }
+            Err(err) => {
+                self.rows_error = Some(err.clone());
+                self.rows.clear();
+                self.row_view.clear();
+                self.set_status(err, StatusKind::Error);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn rebuild_row_view(&mut self) {
+        let previous = self.selected_row().map(|r| r.key());
+        let needle = self.row_filter.as_deref().map(str::to_ascii_lowercase);
+        self.row_view = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| match &needle {
+                None => true,
+                Some(n) => {
+                    r.name.to_ascii_lowercase().contains(n)
+                        || r.namespace.to_ascii_lowercase().contains(n)
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        self.row_selected = previous
+            .and_then(|key| {
+                self.row_view
+                    .iter()
+                    .position(|&i| self.rows[i].key() == key)
+            })
+            .unwrap_or(0);
+        self.row_selected = self.row_selected.min(self.row_view.len().saturating_sub(1));
+        self.rebuild_event_view();
+    }
+
+    pub fn visible_rows(&self) -> impl Iterator<Item = &ResourceRow> {
+        self.row_view.iter().filter_map(|&i| self.rows.get(i))
+    }
+
+    pub fn selected_row(&self) -> Option<&ResourceRow> {
+        let &index = self.row_view.get(self.row_selected)?;
+        self.rows.get(index)
+    }
+
+    /// The selected object as a pod, when the browsed kind *is* pods. Logs and
+    /// container metrics only make sense in that case.
+    pub fn selected_pod(&self) -> Option<&PodInfo> {
+        if self.current_type()?.api.kind != "Pod" {
+            return None;
+        }
+        let row = self.selected_row()?;
+        self.inventory
+            .pods
+            .iter()
+            .find(|p| p.name == row.name && p.namespace == row.namespace)
+    }
+
+    /// Ask the main loop to re-list the current kind.
+    pub fn request_rows(&mut self) {
+        self.loading = true;
+        self.dirty = true;
+    }
+
+    fn set_resource_type(&mut self, selector: &str) {
+        match crate::k8s::resources::resolve(&self.resource_types, selector) {
+            Some(kind) => {
+                let qualified = kind.qualified();
+                self.current_type = self
+                    .resource_types
+                    .iter()
+                    .position(|t| t.qualified() == qualified);
+                self.rows.clear();
+                self.row_view.clear();
+                self.row_selected = 0;
+                self.row_filter = None;
+                self.rows_error = None;
+                self.right = RightMode::Browse;
+                self.pane = Pane::Resources;
+                self.request_rows();
+                self.set_status(format!("browsing {qualified}"), StatusKind::Info);
+            }
+            None => self.set_status(
+                format!("no such resource type: {selector}"),
+                StatusKind::Warn,
+            ),
+        }
+    }
+
+    // -------------------------------------------------------------- contexts
+
+    fn switch_context(&mut self) {
+        let Some(entry) = self.contexts.get(self.context_selected) else {
+            return;
+        };
+        if entry.name == self.context_name {
+            self.set_status(format!("already on {}", entry.name), StatusKind::Info);
+            return;
+        }
+        let name = entry.name.clone();
+        self.set_status(format!("switching to {name}…"), StatusKind::Info);
+        self.pending_context = Some(name);
+    }
+
+    /// Wipe everything cluster-specific. The main loop calls this after it has
+    /// built a client for the new context.
+    pub fn adopt_context(
+        &mut self,
+        client: kube::Client,
+        scope: Scope,
+        context_name: String,
+        user_name: String,
+        k8s_version: String,
+    ) {
+        self.detach_all();
+        self.client = client;
+        self.scope = scope;
+        self.context_name = context_name;
+        self.user_name = user_name;
+        self.k8s_version = k8s_version;
+        self.inventory = Inventory::default();
+        self.metrics = MetricsStore::new(self.config.metrics.history);
+        self.events.clear();
+        self.event_view.clear();
+        self.events_error = None;
+        self.rows.clear();
+        self.row_view.clear();
+        self.row_selected = 0;
+        self.rows_error = None;
+        self.buffer.clear();
+        self.scroll = 0;
+        self.right = RightMode::Browse;
+        self.set_status(
+            format!("connected to {}", self.context_name),
+            StatusKind::Info,
+        );
+    }
+
     // ------------------------------------------------------------- inventory
 
     pub fn on_update(&mut self, update: Update) {
         match update {
             Update::Inventory(inv) => {
                 self.inventory = *inv;
-                self.rebuild_sidebar();
                 self.reconcile_metrics_metadata();
+                // The inventory can land after the user has already opened a
+                // pod, in which case the first attach found nothing to do.
+                self.sync_logs();
                 self.dirty = true;
             }
             Update::Warning(msg) => self.set_status(msg, StatusKind::Warn),
@@ -337,111 +557,50 @@ impl App {
         }
     }
 
-    pub fn rebuild_sidebar(&mut self) {
-        let previous = self
-            .sidebar
-            .get(self.sidebar_selected)
-            .map(|i| i.key().to_string());
+    // --------------------------------------------------------------- events
 
-        let needle = self.pod_filter.as_deref().map(str::to_ascii_lowercase);
-
-        // Bucket pods under their owning workload, preserving first-seen
-        // order so the sidebar stays close to the existing namespace/name
-        // sort. Pods without a recognised owner render exactly as before —
-        // no header, just the pod row.
-        enum Entry {
-            Standalone(usize),
-            Group(String),
-        }
-        struct Group {
-            kind: String,
-            name: String,
-            pods: Vec<usize>,
-        }
-
-        let mut entries: Vec<Entry> = Vec::with_capacity(self.inventory.pods.len());
-        let mut groups: HashMap<String, Group> = HashMap::new();
-        for (idx, pod) in self.inventory.pods.iter().enumerate() {
-            if let Some(n) = &needle {
-                if !pod.name.to_ascii_lowercase().contains(n)
-                    && !pod.namespace.to_ascii_lowercase().contains(n)
-                {
-                    continue;
-                }
+    pub fn on_events(&mut self, update: EventUpdate) {
+        match update {
+            EventUpdate::Events(events) => {
+                self.events_error = None;
+                self.events = events;
+                self.rebuild_event_view();
+                self.dirty = true;
             }
-            if pod.owner_kind.is_empty() || pod.owner_name.is_empty() {
-                entries.push(Entry::Standalone(idx));
-                continue;
-            }
-            let gkey = format!("{}/{}/{}", pod.namespace, pod.owner_kind, pod.owner_name);
-            match groups.get_mut(&gkey) {
-                Some(g) => g.pods.push(idx),
-                None => {
-                    groups.insert(
-                        gkey.clone(),
-                        Group {
-                            kind: pod.owner_kind.clone(),
-                            name: pod.owner_name.clone(),
-                            pods: vec![idx],
-                        },
-                    );
-                    entries.push(Entry::Group(gkey));
-                }
+            EventUpdate::Unavailable(err) => {
+                self.events_error = Some(err.clone());
+                self.set_status(err, StatusKind::Error);
             }
         }
-
-        let mut items = Vec::with_capacity(self.inventory.pods.len() * 2);
-        let push_pod = |items: &mut Vec<SidebarItem>, idx: usize| {
-            let pod = &self.inventory.pods[idx];
-            let key = pod.key();
-            let expanded = self.expanded.contains(&key);
-            items.push(SidebarItem::Pod {
-                key: key.clone(),
-                pod: idx,
-            });
-            if expanded {
-                for c in &pod.containers {
-                    items.push(SidebarItem::Container {
-                        key: format!("{key}:{}", c.name),
-                        pod: idx,
-                        name: c.name.clone(),
-                    });
-                }
-            }
-        };
-        for entry in entries {
-            match entry {
-                Entry::Standalone(idx) => push_pod(&mut items, idx),
-                Entry::Group(gkey) => {
-                    let group = &groups[&gkey];
-                    items.push(SidebarItem::Group {
-                        key: gkey.clone(),
-                        kind: group.kind.clone(),
-                        name: group.name.clone(),
-                    });
-                    if !self.collapsed_groups.contains(&gkey) {
-                        for &idx in &group.pods {
-                            push_pod(&mut items, idx);
-                        }
-                    }
-                }
-            }
-        }
-        self.sidebar = items;
-
-        if let Some(prev) = previous {
-            if let Some(pos) = self.sidebar.iter().position(|i| i.key() == prev) {
-                self.sidebar_selected = pos;
-            }
-        }
-        self.sidebar_selected = self
-            .sidebar_selected
-            .min(self.sidebar.len().saturating_sub(1));
     }
 
-    pub fn selected_pod(&self) -> Option<&PodInfo> {
-        let item = self.sidebar.get(self.sidebar_selected)?;
-        self.inventory.pods.get(item.pod_index()?)
+    /// The events pane is always about the selected object.
+    pub fn event_selector(&self) -> Option<String> {
+        let kind = self.current_type()?.api.kind.to_ascii_lowercase();
+        let row = self.selected_row()?;
+        Some(format!("{kind}/{}", row.name))
+    }
+
+    pub fn rebuild_event_view(&mut self) {
+        let selector = self.event_selector();
+        self.event_view = self
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !self.warnings_only || e.is_warning())
+            .filter(|(_, e)| match &selector {
+                Some(s) => e.matches_resource(s),
+                None => true,
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.event_selected = self
+            .event_selected
+            .min(self.event_view.len().saturating_sub(1));
+    }
+
+    pub fn visible_events(&self) -> impl Iterator<Item = &EventInfo> {
+        self.event_view.iter().filter_map(|&i| self.events.get(i))
     }
 
     // ------------------------------------------------------------------ logs
@@ -471,43 +630,47 @@ impl App {
         }
     }
 
-    pub fn attach_selected(&mut self, all_containers: bool) {
-        let Some(item) = self.sidebar.get(self.sidebar_selected).cloned() else {
-            self.set_status("nothing selected", StatusKind::Warn);
+    /// Make the log streams match whatever the logs tab is currently showing.
+    ///
+    /// Called every time the logs tab becomes visible or the selection moves,
+    /// so the buffer always belongs to exactly one object. A no-op when the
+    /// streams already point at the right pod.
+    pub fn sync_logs(&mut self) {
+        if self.right != RightMode::Detail || self.view != View::Logs {
             return;
-        };
-        let Some(pod_idx) = item.pod_index() else {
-            self.set_status("select a pod, not a workload group", StatusKind::Warn);
-            return;
-        };
-        let Some(pod) = self.inventory.pods.get(pod_idx).cloned() else {
-            return;
-        };
-
-        let containers: Vec<Option<String>> = match (&item, all_containers) {
-            (SidebarItem::Container { name, .. }, false) => vec![Some(name.clone())],
-            _ => pod
-                .containers
-                .iter()
-                .filter(|c| !c.init)
-                .map(|c| Some(c.name.clone()))
-                .collect(),
-        };
-
-        // Picking a single container (`Enter` on a container row) switches
-        // the view to just that container's logs. Bulk-attaching (`a`) stays
-        // additive — that is the merged multi-container view.
-        if matches!(item, SidebarItem::Container { .. }) && !all_containers {
-            self.detach_all();
-            self.buffer.clear();
-            self.scroll = 0;
         }
+        let wanted = self.selected_row().map(|r| r.key());
+        if wanted.is_some() && wanted == self.attached_to {
+            return;
+        }
+        self.detach_all();
+        self.buffer.clear();
+        self.scroll = 0;
+        self.search.current = None;
+        self.attach_selected();
+    }
 
-        for container in containers {
+    /// Attach to every container of the selected pod.
+    pub fn attach_selected(&mut self) {
+        let Some(pod) = self.selected_pod().cloned() else {
+            let hint = match self.current_type() {
+                Some(t) if t.api.kind != "Pod" => {
+                    format!(
+                        "logs are only available for pods — press :pods (this is {})",
+                        t.name()
+                    )
+                }
+                _ => "waiting for the pod inventory…".to_string(),
+            };
+            self.set_status(hint, StatusKind::Warn);
+            return;
+        };
+        self.attached_to = self.selected_row().map(|r| r.key());
+        for container in pod.containers.iter().filter(|c| !c.init) {
             let spec = StreamSpec {
                 namespace: pod.namespace.clone(),
                 pod: pod.name.clone(),
-                container,
+                container: Some(container.name.clone()),
                 tail: self.tail_lines(),
                 since_seconds: self.config.logs.since_seconds,
                 timestamps: self.timestamps,
@@ -521,8 +684,6 @@ impl App {
             self.streams.insert(source.clone(), handle);
             self.attached.push(source);
         }
-        self.view = View::Logs;
-        self.pane = Pane::Content;
         self.dirty = true;
     }
 
@@ -540,7 +701,7 @@ impl App {
             handle.abort();
         }
         self.attached.clear();
-        self.set_status("detached from all streams", StatusKind::Info);
+        self.attached_to = None;
     }
 
     /// Re-attach every current stream, e.g. after toggling timestamps.
@@ -772,10 +933,15 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        // Text-entry modes swallow most keys.
+        // The palette has its own key loop: Tab and the arrows drive the
+        // completion list rather than the prompt text.
+        if self.mode == InputMode::Command {
+            self.on_palette_key(key);
+            return;
+        }
         if matches!(
             self.mode,
-            InputMode::Search | InputMode::Filter | InputMode::Namespace | InputMode::PodFilter
+            InputMode::Search | InputMode::Filter | InputMode::Namespace | InputMode::RowFilter
         ) {
             self.on_prompt_key(key);
             return;
@@ -796,7 +962,7 @@ impl App {
                 KeyCode::Char('f') => self.move_cursor(self.viewport_height as isize),
                 KeyCode::Char('b') => self.move_cursor(-(self.viewport_height as isize)),
                 KeyCode::Char('n') => self.enter_prompt(InputMode::Namespace),
-                KeyCode::Char('p') => self.enter_prompt(InputMode::PodFilter),
+                KeyCode::Char('r') => self.request_rows(),
                 KeyCode::Char('l') => self.dirty = true,
                 _ => {}
             }
@@ -804,35 +970,31 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc => self.on_escape(),
             KeyCode::Char('?') => {
                 self.mode = InputMode::Help;
                 self.dirty = true;
             }
+            KeyCode::Char(':') => self.open_palette(),
 
-            // views and panes
-            KeyCode::Char('1') => self.set_view(View::Logs),
-            KeyCode::Char('2') => self.set_view(View::Metrics),
+            // panes and detail tabs
             KeyCode::Tab => {
                 self.pane = match self.pane {
-                    Pane::Sidebar => Pane::Content,
-                    Pane::Content => Pane::Sidebar,
+                    Pane::Contexts => Pane::Resources,
+                    Pane::Resources => Pane::Contexts,
                 };
                 self.dirty = true;
             }
-            KeyCode::BackTab => {
-                self.set_view(if self.view == View::Logs {
-                    View::Metrics
-                } else {
-                    View::Logs
-                });
-            }
+            KeyCode::Char('1') => self.set_view(View::Logs),
+            KeyCode::Char('2') => self.set_view(View::Metrics),
+            KeyCode::Char('3') => self.set_view(View::Events),
 
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::PageDown | KeyCode::Right => self.move_cursor(self.viewport_height as isize),
-            KeyCode::PageUp | KeyCode::Left => self.move_cursor(-(self.viewport_height as isize)),
+            KeyCode::PageDown => self.move_cursor(self.viewport_height as isize),
+            KeyCode::PageUp => self.move_cursor(-(self.viewport_height as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.goto_start(),
             KeyCode::Char('G') | KeyCode::End => self.goto_end(),
             KeyCode::Char('[') => {
@@ -844,16 +1006,20 @@ impl App {
                 self.dirty = true;
             }
 
-            // selection
             KeyCode::Enter => self.activate_selection(),
-            KeyCode::Char('a') => self.attach_selected(true),
-            KeyCode::Char('x') => self.detach_all(),
+            KeyCode::Char('/') => self.enter_prompt(match self.right {
+                RightMode::Browse => InputMode::RowFilter,
+                RightMode::Detail => InputMode::Search,
+            }),
 
             // log controls
-            KeyCode::Char('/') => self.enter_prompt(InputMode::Search),
             KeyCode::Char('\\') => self.enter_prompt(InputMode::Filter),
             KeyCode::Char('n') => self.search_next(false),
             KeyCode::Char('N') => self.search_next(true),
+            KeyCode::Char('x') => {
+                self.detach_all();
+                self.set_status("detached from all streams", StatusKind::Info);
+            }
             KeyCode::Char('F') => {
                 self.follow = !self.follow;
                 if self.follow {
@@ -872,7 +1038,7 @@ impl App {
                 let msg = if self.wrap { "wrap on" } else { "wrap off" };
                 self.set_status(msg, StatusKind::Info);
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('L') => {
                 let mut filter = self.buffer.filter.clone();
                 filter.min_level = Level::next_threshold(filter.min_level);
                 let label = filter.min_level.label();
@@ -921,7 +1087,19 @@ impl App {
             }
             KeyCode::Char('s') => self.save_buffer(),
 
-            // scoping
+            KeyCode::Char('W') if self.view == View::Events => {
+                self.warnings_only = !self.warnings_only;
+                self.rebuild_event_view();
+                self.set_status(
+                    if self.warnings_only {
+                        "showing warnings only"
+                    } else {
+                        "showing all events"
+                    },
+                    StatusKind::Info,
+                );
+            }
+
             KeyCode::Char('S') => {
                 self.sort_by = self.sort_by.next();
                 let label = self.sort_by.label();
@@ -936,6 +1114,17 @@ impl App {
                 self.dirty = true;
             }
             _ => {}
+        }
+    }
+
+    /// `Esc` steps back out: detail → browse → quit.
+    fn on_escape(&mut self) {
+        match self.right {
+            RightMode::Detail => {
+                self.right = RightMode::Browse;
+                self.dirty = true;
+            }
+            RightMode::Browse => self.should_quit = true,
         }
     }
 
@@ -960,13 +1149,13 @@ impl App {
                     }
                     InputMode::Filter => self.apply_filter_input(&value),
                     InputMode::Namespace => self.set_namespace(&value),
-                    InputMode::PodFilter => {
-                        self.pod_filter = if value.trim().is_empty() {
+                    InputMode::RowFilter => {
+                        self.row_filter = if value.trim().is_empty() {
                             None
                         } else {
                             Some(value.trim().to_string())
                         };
-                        self.rebuild_sidebar();
+                        self.rebuild_row_view();
                     }
                     _ => {}
                 }
@@ -984,7 +1173,76 @@ impl App {
         }
     }
 
-    /// Incremental feedback while typing a search or pod filter.
+    /// The `:` palette over resource types. `Tab` completes into the prompt,
+    /// the arrows move the highlight, and `Enter` accepts it — so `:dep<Enter>`
+    /// lands on `deployments` the way it does in k9s.
+    fn on_palette_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_palette(),
+            KeyCode::Enter => {
+                let chosen = self
+                    .palette
+                    .current()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.input.clone());
+                self.close_palette();
+                if !chosen.trim().is_empty() {
+                    self.set_resource_type(&chosen);
+                }
+            }
+            KeyCode::Tab => {
+                if let Some(completion) = self.palette.current().map(str::to_string) {
+                    if completion == self.input {
+                        self.palette.move_selection(1);
+                    } else {
+                        self.input = completion;
+                        let input = self.input.clone();
+                        self.palette.refilter(&input);
+                    }
+                }
+                self.dirty = true;
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.palette.move_selection(-1);
+                self.dirty = true;
+            }
+            KeyCode::Down => {
+                self.palette.move_selection(1);
+                self.dirty = true;
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                let input = self.input.clone();
+                self.palette.refilter(&input);
+                self.dirty = true;
+            }
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                let input = self.input.clone();
+                self.palette.refilter(&input);
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn open_palette(&mut self) {
+        self.mode = InputMode::Command;
+        self.input.clear();
+        // One entry per kind, named by its canonical plural. Aliases still
+        // match — they just do not clutter the list with duplicates.
+        let candidates: Vec<String> = self.resource_types.iter().map(|t| t.name()).collect();
+        self.palette.reload(candidates, "");
+        self.dirty = true;
+    }
+
+    fn close_palette(&mut self) {
+        self.mode = InputMode::Normal;
+        self.input.clear();
+        self.dirty = true;
+    }
+
+    /// Incremental feedback while typing a search or row filter.
     fn live_preview(&mut self) {
         match self.mode {
             InputMode::Search => {
@@ -992,13 +1250,13 @@ impl App {
                 self.search.regex = self.compile(&self.input);
                 self.refresh_search_count();
             }
-            InputMode::PodFilter => {
-                self.pod_filter = if self.input.is_empty() {
+            InputMode::RowFilter => {
+                self.row_filter = if self.input.is_empty() {
                     None
                 } else {
                     Some(self.input.clone())
                 };
-                self.rebuild_sidebar();
+                self.rebuild_row_view();
             }
             _ => {}
         }
@@ -1013,6 +1271,13 @@ impl App {
 
     fn set_view(&mut self, view: View) {
         self.view = view;
+        // Picking a tab is also how you open the detail pane.
+        if self.right == RightMode::Browse && self.selected_row().is_some() {
+            self.right = RightMode::Detail;
+        }
+        // Unconditional: arriving on the logs tab from *any* other tab has to
+        // attach, not just the Browse → Detail transition.
+        self.sync_logs();
         self.dirty = true;
     }
 
@@ -1023,60 +1288,91 @@ impl App {
         } else {
             Scope::Namespace(value.to_string())
         };
+        self.request_rows();
+        // Inventory, metrics and events all capture the scope when they are
+        // spawned, so they have to come back up against the new one.
+        self.pollers_stale = true;
         self.set_status(
-            format!("namespace scope: {} (restart pollers)", self.scope.label()),
+            format!("namespace scope: {}", self.scope.label()),
             StatusKind::Info,
         );
     }
 
     fn move_cursor(&mut self, delta: isize) {
-        match (self.pane, self.view) {
-            (Pane::Sidebar, _) => {
-                let len = self.sidebar.len();
+        match (self.pane, self.right) {
+            (Pane::Contexts, _) => {
+                let len = self.contexts.len();
                 if len == 0 {
                     return;
                 }
-                let next = (self.sidebar_selected as isize + delta).clamp(0, len as isize - 1);
-                self.sidebar_selected = next as usize;
+                self.context_selected =
+                    (self.context_selected as isize + delta).clamp(0, len as isize - 1) as usize;
                 self.dirty = true;
             }
-            (Pane::Content, View::Logs) => self.scroll_by(delta),
-            (Pane::Content, View::Metrics) => {
-                match self.metric_pane {
-                    MetricPane::Nodes => {
-                        let len = self.metrics.nodes.len();
-                        if len > 0 {
-                            self.node_selected = (self.node_selected as isize + delta)
-                                .clamp(0, len as isize - 1)
-                                as usize;
-                        }
-                    }
-                    MetricPane::Pods => {
-                        let len = self.metrics.pods.len();
-                        if len > 0 {
-                            self.pod_metric_selected = (self.pod_metric_selected as isize + delta)
-                                .clamp(0, len as isize - 1)
-                                as usize;
-                        }
-                    }
-                    MetricPane::Volumes => {
-                        let len = self.inventory.volumes.len();
-                        if len > 0 {
-                            self.volume_selected = (self.volume_selected as isize + delta)
-                                .clamp(0, len as isize - 1)
-                                as usize;
-                        }
-                    }
+            (Pane::Resources, RightMode::Browse) => {
+                let len = self.row_view.len();
+                if len == 0 {
+                    return;
                 }
+                self.row_selected =
+                    (self.row_selected as isize + delta).clamp(0, len as isize - 1) as usize;
+                // The detail tabs follow the browser's selection.
+                self.rebuild_event_view();
                 self.dirty = true;
             }
+            (Pane::Resources, RightMode::Detail) => match self.view {
+                View::Logs => self.scroll_by(delta),
+                View::Events => {
+                    let len = self.event_view.len();
+                    if len > 0 {
+                        self.event_selected = (self.event_selected as isize + delta)
+                            .clamp(0, len as isize - 1)
+                            as usize;
+                    }
+                    self.dirty = true;
+                }
+                View::Metrics => {
+                    match self.metric_pane {
+                        MetricPane::Nodes => {
+                            let len = self.metrics.nodes.len();
+                            if len > 0 {
+                                self.node_selected = (self.node_selected as isize + delta)
+                                    .clamp(0, len as isize - 1)
+                                    as usize;
+                            }
+                        }
+                        MetricPane::Pods => {
+                            let len = self.metrics.pods.len();
+                            if len > 0 {
+                                self.pod_metric_selected = (self.pod_metric_selected as isize
+                                    + delta)
+                                    .clamp(0, len as isize - 1)
+                                    as usize;
+                            }
+                        }
+                        MetricPane::Volumes => {
+                            let len = self.inventory.volumes.len();
+                            if len > 0 {
+                                self.volume_selected = (self.volume_selected as isize + delta)
+                                    .clamp(0, len as isize - 1)
+                                    as usize;
+                            }
+                        }
+                    }
+                    self.dirty = true;
+                }
+            },
         }
     }
 
     fn goto_start(&mut self) {
-        match self.pane {
-            Pane::Sidebar => self.sidebar_selected = 0,
-            Pane::Content => {
+        match (self.pane, self.right) {
+            (Pane::Contexts, _) => self.context_selected = 0,
+            (Pane::Resources, RightMode::Browse) => {
+                self.row_selected = 0;
+                self.rebuild_event_view();
+            }
+            (Pane::Resources, RightMode::Detail) => {
                 self.follow = false;
                 self.scroll = 0;
             }
@@ -1085,9 +1381,15 @@ impl App {
     }
 
     fn goto_end(&mut self) {
-        match self.pane {
-            Pane::Sidebar => self.sidebar_selected = self.sidebar.len().saturating_sub(1),
-            Pane::Content => {
+        match (self.pane, self.right) {
+            (Pane::Contexts, _) => {
+                self.context_selected = self.contexts.len().saturating_sub(1);
+            }
+            (Pane::Resources, RightMode::Browse) => {
+                self.row_selected = self.row_view.len().saturating_sub(1);
+                self.rebuild_event_view();
+            }
+            (Pane::Resources, RightMode::Detail) => {
                 self.follow = true;
                 self.scroll_to_bottom();
             }
@@ -1096,28 +1398,15 @@ impl App {
     }
 
     fn activate_selection(&mut self) {
-        if self.pane != Pane::Sidebar {
-            return;
-        }
-        let Some(item) = self.sidebar.get(self.sidebar_selected).cloned() else {
-            return;
-        };
-        match item {
-            SidebarItem::Group { key, .. } => {
-                if !self.collapsed_groups.remove(&key) {
-                    self.collapsed_groups.insert(key);
+        match self.pane {
+            Pane::Contexts => self.switch_context(),
+            Pane::Resources => {
+                if self.right == RightMode::Browse && self.selected_row().is_some() {
+                    self.right = RightMode::Detail;
+                    self.sync_logs();
+                    self.dirty = true;
                 }
-                self.rebuild_sidebar();
-                self.dirty = true;
             }
-            SidebarItem::Pod { key, .. } => {
-                if !self.expanded.remove(&key) {
-                    self.expanded.insert(key);
-                }
-                self.rebuild_sidebar();
-                self.dirty = true;
-            }
-            SidebarItem::Container { .. } => self.attach_selected(false),
         }
     }
 

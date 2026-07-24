@@ -30,6 +30,10 @@ pub struct General {
     pub namespace: Option<String>,
     /// Refresh interval for the pod/node inventory, in milliseconds.
     pub inventory_refresh_ms: u64,
+    /// Refresh interval for cluster events, in milliseconds. Slower than the
+    /// inventory by default: events are cheap to read but rarely worth
+    /// re-listing more than a couple of times a minute.
+    pub events_refresh_ms: u64,
     /// Mouse support (scroll wheel + click to select).
     pub mouse: bool,
 }
@@ -40,6 +44,7 @@ impl Default for General {
             max_fps: 30,
             namespace: None,
             inventory_refresh_ms: 5_000,
+            events_refresh_ms: 10_000,
             mouse: true,
         }
     }
