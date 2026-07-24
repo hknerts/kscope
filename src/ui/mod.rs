@@ -282,7 +282,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     continue;
                 };
                 let (ready, total) = info.ready();
-                let marker = if app.expanded.contains(key) { "▾" } else { "▸" };
+                let marker = if app.expanded.contains(key) {
+                    "▾"
+                } else {
+                    "▸"
+                };
                 let color = if info.healthy() {
                     Theme::color(&theme.info)
                 } else {
@@ -315,7 +319,13 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     .inventory
                     .pods
                     .get(*pod)
-                    .map(|p| if p.owner_kind.is_empty() { "   " } else { "     " })
+                    .map(|p| {
+                        if p.owner_kind.is_empty() {
+                            "   "
+                        } else {
+                            "     "
+                        }
+                    })
                     .unwrap_or("   ");
                 items.push(ListItem::new(Line::from(vec![
                     Span::raw(indent),

@@ -93,10 +93,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         " kscope is read-only: it never mutates cluster state.",
         dim,
     )));
-    lines.push(Line::from(Span::styled(
-        " press any key to close",
-        dim,
-    )));
+    lines.push(Line::from(Span::styled(" press any key to close", dim)));
 
     let block = Block::default()
         .borders(Borders::ALL)

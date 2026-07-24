@@ -67,8 +67,15 @@ pub enum SidebarItem {
         kind: String,
         name: String,
     },
-    Pod { key: String, pod: usize },
-    Container { key: String, pod: usize, name: String },
+    Pod {
+        key: String,
+        pod: usize,
+    },
+    Container {
+        key: String,
+        pod: usize,
+        name: String,
+    },
 }
 
 impl SidebarItem {
@@ -454,9 +461,10 @@ impl App {
             LogEvent::Attached(source) => {
                 self.set_status(format!("streaming {source}"), StatusKind::Info)
             }
-            LogEvent::Ended(source) => {
-                self.set_status(format!("{source} stream ended — retrying"), StatusKind::Warn)
-            }
+            LogEvent::Ended(source) => self.set_status(
+                format!("{source} stream ended — retrying"),
+                StatusKind::Warn,
+            ),
             LogEvent::Failed { source, error } => {
                 self.set_status(format!("{source}: {error}"), StatusKind::Error)
             }
@@ -600,7 +608,7 @@ impl App {
     pub fn sorted_pod_metrics(&self) -> Vec<&crate::metrics::PodMetrics> {
         let mut rows: Vec<_> = self.metrics.pods.values().collect();
         match self.sort_by {
-            SortBy::Name => rows.sort_by(|a, b| a.key().cmp(&b.key())),
+            SortBy::Name => rows.sort_by_key(|a| a.key()),
             SortBy::Cpu => rows.sort_by(|a, b| {
                 b.usage
                     .cpu
@@ -823,12 +831,8 @@ impl App {
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::PageDown | KeyCode::Right => {
-                self.move_cursor(self.viewport_height as isize)
-            }
-            KeyCode::PageUp | KeyCode::Left => {
-                self.move_cursor(-(self.viewport_height as isize))
-            }
+            KeyCode::PageDown | KeyCode::Right => self.move_cursor(self.viewport_height as isize),
+            KeyCode::PageUp | KeyCode::Left => self.move_cursor(-(self.viewport_height as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.goto_start(),
             KeyCode::Char('G') | KeyCode::End => self.goto_end(),
             KeyCode::Char('[') => {
@@ -855,7 +859,11 @@ impl App {
                 if self.follow {
                     self.scroll_to_bottom();
                 }
-                let msg = if self.follow { "follow on" } else { "follow off" };
+                let msg = if self.follow {
+                    "follow on"
+                } else {
+                    "follow off"
+                };
                 self.set_status(msg, StatusKind::Info);
             }
             KeyCode::Char('w') => {

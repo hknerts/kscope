@@ -52,11 +52,17 @@ fn ingests_a_large_stream_and_stays_bounded() {
     assert_eq!(buffer.len(), 50_000, "buffer must not grow past capacity");
     assert_eq!(buffer.received, 200_000);
     assert_eq!(buffer.dropped, 150_000);
-    assert_eq!(buffer.view_len(), 50_000, "no filter means everything shows");
+    assert_eq!(
+        buffer.view_len(),
+        50_000,
+        "no filter means everything shows"
+    );
 
     // Errors only.
-    let mut filter = Filter::default();
-    filter.errors_only = true;
+    let filter = Filter {
+        errors_only: true,
+        ..Filter::default()
+    };
     buffer.set_filter(filter);
     assert_eq!(buffer.view_len(), 500);
     assert!(buffer
@@ -74,8 +80,10 @@ fn ingests_a_large_stream_and_stays_bounded() {
     buffer.push(line("INFO everything is fine"));
     let incremental = buffer.view_len();
 
-    let mut same_filter = Filter::default();
-    same_filter.errors_only = true;
+    let same_filter = Filter {
+        errors_only: true,
+        ..Filter::default()
+    };
     buffer.set_filter(same_filter);
     assert_eq!(
         buffer.view_len(),
@@ -85,7 +93,11 @@ fn ingests_a_large_stream_and_stays_bounded() {
 
     // The newest error is the last visible line, and search finds it there.
     let last = buffer.view_len() - 1;
-    assert!(buffer.view_line(last).unwrap().raw.contains("one more failure"));
+    assert!(buffer
+        .view_line(last)
+        .unwrap()
+        .raw
+        .contains("one more failure"));
 
     let needle = Regex::new("one more failure").unwrap();
     assert_eq!(buffer.search_forward(0, &needle), Some(last));
@@ -100,9 +112,11 @@ fn include_and_exclude_filters_compose() {
     buffer.push(line("INFO GET /orders 200"));
     buffer.push(line("INFO POST /orders 500"));
 
-    let mut filter = Filter::default();
-    filter.include = Some(Regex::new("/orders").unwrap());
-    filter.exclude = Some(Regex::new("POST").unwrap());
+    let filter = Filter {
+        include: Some(Regex::new("/orders").unwrap()),
+        exclude: Some(Regex::new("POST").unwrap()),
+        ..Filter::default()
+    };
     buffer.set_filter(filter);
 
     assert_eq!(buffer.view_len(), 1);
@@ -116,8 +130,10 @@ fn exports_only_the_visible_lines() {
     buffer.push(line("INFO first"));
     buffer.push(line("ERROR second"));
 
-    let mut filter = Filter::default();
-    filter.errors_only = true;
+    let filter = Filter {
+        errors_only: true,
+        ..Filter::default()
+    };
     buffer.set_filter(filter);
 
     let text = buffer.to_plain_text();
@@ -204,7 +220,11 @@ fn metric_store_tracks_node_pod_and_container_separately() {
     let mut store = MetricsStore::new(32);
 
     for step in 0..5 {
-        store.record_node("node-a", 1000.0 + step as f64, 8.0 * 1024.0 * 1024.0 * 1024.0);
+        store.record_node(
+            "node-a",
+            1000.0 + step as f64,
+            8.0 * 1024.0 * 1024.0 * 1024.0,
+        );
         store.record_pod(
             "prod",
             "api-0",
@@ -221,7 +241,11 @@ fn metric_store_tracks_node_pod_and_container_separately() {
 
     let pod = store.pods.get("prod/api-0").expect("pod recorded");
     assert_eq!(pod.containers.len(), 2, "containers tracked individually");
-    assert_eq!(pod.usage.cpu.last(), 234.0, "pod total is the container sum");
+    assert_eq!(
+        pod.usage.cpu.last(),
+        234.0,
+        "pod total is the container sum"
+    );
     assert_eq!(fmt_bytes(pod.usage.mem.last()), "576.0Mi");
 
     // The sparkline is scaled into the 0..100 range ratatui expects.

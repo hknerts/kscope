@@ -136,21 +136,19 @@ pub async fn collect(client: &kube::Client, scope: &Scope) -> Result<Inventory> 
         Err(_) => Vec::new(),
     };
 
-    let mut namespaces: Vec<String> =
-        match Api::<Namespace>::all(client.clone()).list(&lp).await {
-            Ok(list) => list
-                .items
-                .into_iter()
-                .filter_map(|ns| ns.metadata.name)
-                .collect(),
-            Err(_) => {
-                let mut seen: Vec<String> =
-                    pods.iter().map(|p| p.namespace.clone()).collect();
-                seen.sort();
-                seen.dedup();
-                seen
-            }
-        };
+    let mut namespaces: Vec<String> = match Api::<Namespace>::all(client.clone()).list(&lp).await {
+        Ok(list) => list
+            .items
+            .into_iter()
+            .filter_map(|ns| ns.metadata.name)
+            .collect(),
+        Err(_) => {
+            let mut seen: Vec<String> = pods.iter().map(|p| p.namespace.clone()).collect();
+            seen.sort();
+            seen.dedup();
+            seen
+        }
+    };
     namespaces.sort();
 
     // PVCs are optional for the same reason nodes are: a namespaced viewer
@@ -200,7 +198,7 @@ fn convert_pod(pod: Pod, now: chrono::DateTime<chrono::Utc>) -> (PodInfo, Vec<St
     let age_seconds = meta
         .creation_timestamp
         .as_ref()
-        .map(|t| (now - t.0).num_seconds())
+        .map(|t| now.timestamp() - t.0.as_second())
         .unwrap_or(0);
 
     let mut statuses: BTreeMap<String, (bool, i32, String)> = BTreeMap::new();
@@ -236,10 +234,11 @@ fn convert_pod(pod: Pod, now: chrono::DateTime<chrono::Utc>) -> (PodInfo, Vec<St
         .map(|c| (true, c))
         .chain(spec.containers.into_iter().map(|c| (false, c)))
     {
-        let (ready, restarts, state) = statuses
-            .get(&c.name)
-            .cloned()
-            .unwrap_or((false, 0, "Pending".to_string()));
+        let (ready, restarts, state) =
+            statuses
+                .get(&c.name)
+                .cloned()
+                .unwrap_or((false, 0, "Pending".to_string()));
         let (cpu_request, mem_request) = c
             .resources
             .as_ref()
@@ -343,10 +342,7 @@ fn convert_node(node: Node) -> NodeInfo {
     let ready = status
         .conditions
         .as_ref()
-        .map(|cs| {
-            cs.iter()
-                .any(|c| c.type_ == "Ready" && c.status == "True")
-        })
+        .map(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
         .unwrap_or(false);
     let roles = meta
         .labels

@@ -7,7 +7,9 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 
 use crate::app::{App, Pane, View};
@@ -130,8 +132,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // Scrollbar on the right edge of the block.
     let total = app.buffer.view_len();
     if total > inner.height as usize {
-        let mut state = ScrollbarState::new(total.saturating_sub(inner.height as usize))
-            .position(app.scroll);
+        let mut state =
+            ScrollbarState::new(total.saturating_sub(inner.height as usize)).position(app.scroll);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -218,14 +220,7 @@ fn short_source(source: &str) -> String {
 
 /// Deterministic colour per stream so interleaved logs stay readable.
 fn source_color(source: &str, theme: &crate::config::Theme) -> ratatui::style::Color {
-    const PALETTE: [&str; 6] = [
-        "cyan",
-        "magenta",
-        "green",
-        "yellow",
-        "blue",
-        "lightcyan",
-    ];
+    const PALETTE: [&str; 6] = ["cyan", "magenta", "green", "yellow", "blue", "lightcyan"];
     let hash = source
         .bytes()
         .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
