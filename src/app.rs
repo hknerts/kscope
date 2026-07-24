@@ -27,7 +27,7 @@ use crate::k8s::resources::{ResourceRow, ResourceType};
 use crate::k8s::{Inventory, PodInfo};
 use crate::logs::{Highlighter, Level, LogBuffer, LogLine};
 use crate::metrics::MetricsStore;
-use crate::palette::Palette;
+use crate::palette::{Candidate, Palette};
 
 /// Which detail tab is on screen for the selected object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -993,8 +993,9 @@ impl App {
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::PageDown => self.move_cursor(self.viewport_height as isize),
-            KeyCode::PageUp => self.move_cursor(-(self.viewport_height as isize)),
+            // → / ← page as well as PgDn/PgUp; horizontal scrolling is on [ ].
+            KeyCode::PageDown | KeyCode::Right => self.move_cursor(self.viewport_height as isize),
+            KeyCode::PageUp | KeyCode::Left => self.move_cursor(-(self.viewport_height as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.goto_start(),
             KeyCode::Char('G') | KeyCode::End => self.goto_end(),
             KeyCode::Char('[') => {
@@ -1229,9 +1230,14 @@ impl App {
     fn open_palette(&mut self) {
         self.mode = InputMode::Command;
         self.input.clear();
-        // One entry per kind, named by its canonical plural. Aliases still
-        // match — they just do not clutter the list with duplicates.
-        let candidates: Vec<String> = self.resource_types.iter().map(|t| t.name()).collect();
+        // One entry per kind, displayed by its canonical plural but matched on
+        // every alias too, so `pvc` reaches persistentvolumeclaims instead of
+        // fuzzy-matching some unrelated plural.
+        let candidates: Vec<Candidate> = self
+            .resource_types
+            .iter()
+            .map(|t| Candidate::with_keys(t.name(), t.aliases()))
+            .collect();
         self.palette.reload(candidates, "");
         self.dirty = true;
     }
