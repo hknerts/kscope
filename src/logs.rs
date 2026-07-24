@@ -2,8 +2,10 @@
 //!
 //! Design notes (this is the hot path, so it is worth stating explicitly):
 //!
-//! * Lines live in a fixed-capacity [`VecDeque`] ring buffer. Pushing is O(1)
-//!   and never reallocates once the buffer is full.
+//! * Lines live in a [`VecDeque`]. By default it is **unbounded**, so a session
+//!   holds every line the container ever emitted; setting `logs.buffer_lines`
+//!   turns it into a fixed-capacity ring buffer that evicts the oldest lines.
+//!   Pushing is O(1) either way.
 //! * Every line is classified **once**, on arrival, into a [`Level`]. Filtering
 //!   and colouring then only look at a `u8`-sized enum instead of re-scanning
 //!   text on every frame.
@@ -283,7 +285,8 @@ pub struct LogBuffer {
     lines: VecDeque<LogLine>,
     /// Global id of `lines[0]`.
     base: u64,
-    cap: usize,
+    /// `None` means unbounded: nothing is ever evicted.
+    cap: Option<usize>,
     /// Total lines ever received (including evicted ones).
     pub received: u64,
     /// Lines evicted because the buffer was full.
@@ -296,10 +299,11 @@ pub struct LogBuffer {
 }
 
 impl LogBuffer {
+    /// `cap == 0` creates an unbounded buffer (retain everything).
     pub fn new(cap: usize) -> Self {
-        let cap = cap.max(64);
+        let cap = if cap == 0 { None } else { Some(cap.max(64)) };
         Self {
-            lines: VecDeque::with_capacity(cap.min(8192)),
+            lines: VecDeque::with_capacity(cap.unwrap_or(4096).min(8192)),
             base: 0,
             cap,
             received: 0,
@@ -310,8 +314,19 @@ impl LogBuffer {
         }
     }
 
-    pub fn capacity(&self) -> usize {
+    /// `None` when the buffer is unbounded.
+    pub fn capacity(&self) -> Option<usize> {
         self.cap
+    }
+
+    /// Rough resident size of the retained lines, in bytes. Shown in the status
+    /// bar so an unbounded session cannot silently eat the machine.
+    pub fn memory_bytes(&self) -> usize {
+        const OVERHEAD: usize = std::mem::size_of::<LogLine>();
+        self.lines
+            .iter()
+            .map(|l| l.raw.len() + OVERHEAD)
+            .sum()
     }
 
     pub fn len(&self) -> usize {
@@ -333,7 +348,7 @@ impl LogBuffer {
 
     pub fn push(&mut self, line: LogLine) {
         self.received += 1;
-        if self.lines.len() == self.cap {
+        if self.cap == Some(self.lines.len()) {
             if let Some(old) = self.lines.pop_front() {
                 self.counts[old.level as usize] = self.counts[old.level as usize].saturating_sub(1);
                 if self.view.front() == Some(&self.base) {
@@ -580,6 +595,19 @@ mod tests {
         // "err" inside "cherry" must not promote the line to ERROR.
         assert_eq!(classify("cherry picking commits"), Level::Info);
         assert_eq!(classify("terrace warmer"), Level::Info);
+    }
+
+    #[test]
+    fn unbounded_buffer_never_evicts() {
+        let mut buf = LogBuffer::new(0);
+        for i in 0..10_000 {
+            buf.push(line(&format!("line {i}")));
+        }
+        assert_eq!(buf.len(), 10_000);
+        assert_eq!(buf.dropped, 0, "nothing may be dropped when unbounded");
+        assert!(buf.capacity().is_none());
+        assert_eq!(&*buf.view_line(0).unwrap().raw, "line 0");
+        assert!(buf.memory_bytes() > 0);
     }
 
     #[test]

@@ -24,13 +24,19 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE", env = "KSCOPE_CONFIG")]
     pub config: Option<PathBuf>,
 
-    /// Number of historical lines to request when attaching to a container.
+    /// Historical lines to request when attaching. 0 (the default) means the
+    /// container's entire retained history, from when it started.
     #[arg(long, value_name = "N")]
     pub tail: Option<i64>,
 
-    /// Maximum number of lines held in memory.
+    /// Maximum lines held in memory. 0 (the default) means unlimited, so you
+    /// can always scroll back to the start of the session.
     #[arg(long, value_name = "N")]
     pub buffer: Option<usize>,
+
+    /// Only fetch lines from the last N seconds (e.g. --since 3600).
+    #[arg(long, value_name = "SECONDS")]
+    pub since: Option<i64>,
 
     /// Metrics poll interval in milliseconds.
     #[arg(long, value_name = "MS")]

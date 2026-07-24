@@ -48,11 +48,17 @@ impl Default for General {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogsConfig {
-    /// Maximum number of lines kept in memory per stream. Older lines are
-    /// dropped from the front of the ring buffer.
+    /// Maximum number of lines kept in memory. **`0` means unlimited**, which
+    /// is the default: nothing is ever dropped, so you can always scroll back
+    /// to the first line of the session. Set a positive value to turn the
+    /// buffer into a ring that evicts the oldest lines instead.
     pub buffer_lines: usize,
     /// How many historical lines to request when attaching to a container.
+    /// **`0` means "everything the API server still has"**, i.e. from the
+    /// moment the container started. A positive value only narrows that.
     pub tail_lines: i64,
+    /// Only fetch lines newer than this many seconds. `None` means no limit.
+    pub since_seconds: Option<i64>,
     /// Ask the API server for RFC3339 timestamps on every line.
     pub timestamps: bool,
     /// Start in "follow" (auto-scroll) mode.
@@ -67,8 +73,9 @@ pub struct LogsConfig {
 impl Default for LogsConfig {
     fn default() -> Self {
         Self {
-            buffer_lines: 50_000,
-            tail_lines: 500,
+            buffer_lines: 0,
+            tail_lines: 0,
+            since_seconds: None,
             timestamps: false,
             follow: true,
             wrap: false,
@@ -237,7 +244,9 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let c = Config::default();
-        assert!(c.logs.buffer_lines >= 1000);
+        // 0 == unlimited on both: full history, nothing evicted.
+        assert_eq!(c.logs.buffer_lines, 0);
+        assert_eq!(c.logs.tail_lines, 0);
         assert!(c.metrics.refresh_ms >= 1000);
         assert!(c.general.max_fps > 0);
     }

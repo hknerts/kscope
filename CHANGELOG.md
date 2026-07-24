@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Logs are now unlimited by default. Attaching requests the container's entire
+  retained history instead of a 500-line tail, and the in-memory buffer is
+  unbounded (`logs.buffer_lines = 0`) instead of a 50 000-line ring buffer.
+  Set `tail_lines` or `buffer_lines` to a positive value to restore a cap.
+
+### Added
+
+- `--since SECONDS` to fetch only recent lines.
+- Live memory usage of the retained buffer in the status bar.
+
 ## [0.1.0] - 2026-07-24
 
 ### Added

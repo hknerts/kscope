@@ -197,11 +197,14 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Theme::color(&theme.debug)),
     ));
     spans.push(Span::styled(
-        format!(
-            "  buffer {}/{}",
-            app.buffer.len(),
-            app.buffer.capacity()
-        ),
+        match app.buffer.capacity() {
+            Some(cap) => format!("  buffer {}/{}", app.buffer.len(), cap),
+            None => format!(
+                "  buffer {} lines · {:.1} MiB · unlimited",
+                app.buffer.len(),
+                app.buffer.memory_bytes() as f64 / (1024.0 * 1024.0)
+            ),
+        },
         dim,
     ));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
