@@ -52,10 +52,16 @@ impl StreamSpec {
 #[derive(Debug)]
 pub enum LogEvent {
     Attached(Arc<str>),
-    Batch { source: Arc<str>, lines: Vec<String> },
+    Batch {
+        source: Arc<str>,
+        lines: Vec<String>,
+    },
     /// The container exited or the stream was closed by the API server.
     Ended(Arc<str>),
-    Failed { source: Arc<str>, error: String },
+    Failed {
+        source: Arc<str>,
+        error: String,
+    },
 }
 
 /// Spawn a follower task. Drop/abort the returned handle to detach.

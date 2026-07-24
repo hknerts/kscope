@@ -165,22 +165,21 @@ async fn run(
     let metrics_interval = Duration::from_millis(config.metrics.refresh_ms);
     let frame_budget = Duration::from_millis(1000 / config.general.max_fps.max(1) as u64);
 
-    let inventory_task = k8s::discovery::spawn(
-        client.clone(),
-        scope.clone(),
-        inventory_interval,
-        inv_tx,
-    );
-    let metrics_task = k8s::metrics::spawn(
-        client.clone(),
-        scope.clone(),
-        metrics_interval,
-        met_tx,
-    );
+    let inventory_task =
+        k8s::discovery::spawn(client.clone(), scope.clone(), inventory_interval, inv_tx);
+    let metrics_task = k8s::metrics::spawn(client.clone(), scope.clone(), metrics_interval, met_tx);
 
     let k8s_version = k8s::server_version(&client).await;
     let mut input = event::spawn();
-    let mut app = App::new(config, client, scope, log_tx, context_name, user_name, k8s_version);
+    let mut app = App::new(
+        config,
+        client,
+        scope,
+        log_tx,
+        context_name,
+        user_name,
+        k8s_version,
+    );
 
     // Draw once immediately so the user sees the shell before the first poll.
     terminal.draw(|f| ui::draw(f, &mut app))?;

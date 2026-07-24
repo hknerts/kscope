@@ -137,7 +137,6 @@ impl Series {
             })
             .collect()
     }
-
 }
 
 /// CPU + memory usage pair with history.
@@ -317,12 +316,7 @@ impl MetricsStore {
     }
 
     /// Record one pod sample with its per-container breakdown.
-    pub fn record_pod(
-        &mut self,
-        namespace: &str,
-        name: &str,
-        containers: &[(String, f64, f64)],
-    ) {
+    pub fn record_pod(&mut self, namespace: &str, name: &str, containers: &[(String, f64, f64)]) {
         let history = self.history;
         let key = format!("{namespace}/{name}");
         let entry = self.pods.entry(key).or_insert_with(|| PodMetrics {

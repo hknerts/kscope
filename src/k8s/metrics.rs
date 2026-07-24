@@ -76,7 +76,11 @@ pub fn spawn(
             match poll(&client, &scope).await {
                 Ok(snapshot) => {
                     reported_failure = false;
-                    if tx.send(MetricsEvent::Snapshot(Box::new(snapshot))).await.is_err() {
+                    if tx
+                        .send(MetricsEvent::Snapshot(Box::new(snapshot)))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -111,9 +115,8 @@ pub async fn poll(client: &kube::Client, scope: &Scope) -> Result<MetricsSnapsho
 
     let (pods_res, nodes_res) = tokio::join!(pods_api.list(&lp), nodes_api.list(&lp));
 
-    let pod_list = pods_res.map_err(|e| {
-        anyhow!("metrics.k8s.io unavailable ({e}); is metrics-server installed?")
-    })?;
+    let pod_list = pods_res
+        .map_err(|e| anyhow!("metrics.k8s.io unavailable ({e}); is metrics-server installed?"))?;
 
     let mut pods = Vec::with_capacity(pod_list.items.len());
     for item in pod_list.items {

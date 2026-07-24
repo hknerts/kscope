@@ -7,9 +7,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, TableState,
-};
+use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::{App, MetricPane, Pane, View};
@@ -103,8 +101,7 @@ fn draw_cluster(f: &mut Frame, app: &App, area: Rect) {
 
 fn pane_border(app: &App, pane: MetricPane) -> Style {
     let theme = &app.config.theme;
-    let focused =
-        app.pane == Pane::Content && app.view == View::Metrics && app.metric_pane == pane;
+    let focused = app.pane == Pane::Content && app.view == View::Metrics && app.metric_pane == pane;
     Style::default().fg(if focused {
         theme.border_focus()
     } else {
@@ -152,19 +149,14 @@ fn draw_nodes(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(5),
         ],
     )
-    .header(
-        Row::new(vec![
-            "NODE", "CPU", "%", "", "MEM", "%", "", "PODS",
-        ])
-        .style(dim),
-    )
+    .header(Row::new(vec!["NODE", "CPU", "%", "", "MEM", "%", "", "PODS"]).style(dim))
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border(app, MetricPane::Nodes))
             .title(format!(" nodes ({}) ", nodes.len())),
     )
-    .highlight_style(
+    .row_highlight_style(
         Style::default()
             .bg(theme.accent())
             .fg(Theme::color(&theme.match_fg)),
@@ -231,7 +223,14 @@ fn draw_pods(f: &mut Frame, app: &mut App, area: Rect) {
     )
     .header(
         Row::new(vec![
-            "NAMESPACE", "POD", "CPU", "LIM%", "MEM", "LIM%", "RS", "NODE",
+            "NAMESPACE",
+            "POD",
+            "CPU",
+            "LIM%",
+            "MEM",
+            "LIM%",
+            "RS",
+            "NODE",
         ])
         .style(dim),
     )
@@ -245,7 +244,7 @@ fn draw_pods(f: &mut Frame, app: &mut App, area: Rect) {
                 app.sort_by.label()
             )),
     )
-    .highlight_style(
+    .row_highlight_style(
         Style::default()
             .bg(theme.accent())
             .fg(Theme::color(&theme.match_fg)),
@@ -305,7 +304,13 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
     )
     .header(
         Row::new(vec![
-            "NAMESPACE", "PVC", "STATUS", "SIZE", "CLASS", "ACCESS", "USED BY",
+            "NAMESPACE",
+            "PVC",
+            "STATUS",
+            "SIZE",
+            "CLASS",
+            "ACCESS",
+            "USED BY",
         ])
         .style(dim),
     )
@@ -315,7 +320,7 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
             .border_style(pane_border(app, MetricPane::Volumes))
             .title(format!(" volumes ({}) ", volumes.len())),
     )
-    .highlight_style(
+    .row_highlight_style(
         Style::default()
             .bg(theme.accent())
             .fg(Theme::color(&theme.match_fg)),
@@ -456,7 +461,7 @@ fn draw_containers(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Sparkline::default()
-            .data(&pod.usage.cpu.sparkline(width, cpu_scale))
+            .data(pod.usage.cpu.sparkline(width, cpu_scale))
             .max(100)
             .style(Style::default().fg(theme.accent())),
         spark[1],
@@ -475,7 +480,7 @@ fn draw_containers(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(
         Sparkline::default()
-            .data(&pod.usage.mem.sparkline(width, mem_scale))
+            .data(pod.usage.mem.sparkline(width, mem_scale))
             .max(100)
             .style(Style::default().fg(Theme::color(&theme.debug))),
         spark[3],
@@ -485,7 +490,9 @@ fn draw_containers(f: &mut Frame, app: &App, area: Rect) {
 /// Tiny inline bar for table cells.
 fn bar(percent: f64) -> String {
     const WIDTH: usize = 10;
-    let filled = ((percent / 100.0) * WIDTH as f64).round().clamp(0.0, WIDTH as f64) as usize;
+    let filled = ((percent / 100.0) * WIDTH as f64)
+        .round()
+        .clamp(0.0, WIDTH as f64) as usize;
     let mut s = String::with_capacity(WIDTH);
     for i in 0..WIDTH {
         s.push(if i < filled { '█' } else { '░' });
