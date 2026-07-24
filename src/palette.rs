@@ -1,9 +1,8 @@
 //! The `:` command palette — k9s-style resource jumping with live filtering
 //! and autocompletion.
 //!
-//! Candidates are derived from whatever is actually on screen (the kinds and
-//! `kind/name` pairs present in the current event list), so the palette never
-//! offers a resource the cluster has nothing to say about.
+//! Candidates come from the cluster's own discovery API, so the palette only
+//! ever offers kinds this cluster actually serves — CRDs included.
 
 /// How well a candidate matched, best first. Ordering matters more than the
 /// absolute numbers: an exact prefix always beats a substring, which always
@@ -45,12 +44,49 @@ fn score(candidate: &str, query: &str) -> Option<Score> {
     None
 }
 
+/// One thing the palette can complete to.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    /// What is displayed, and what gets accepted on `Enter`.
+    pub value: String,
+    /// Extra strings that also select this candidate — for resource types,
+    /// the singular kind and the kubectl short name. Without these, typing a
+    /// short name like `pvc` would fuzzy-match some unrelated plural
+    /// (`apiservices` contains p, v and c in order) instead of the kind the
+    /// user meant.
+    pub keys: Vec<String>,
+}
+
+impl Candidate {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            keys: Vec::new(),
+        }
+    }
+
+    pub fn with_keys(value: impl Into<String>, keys: Vec<String>) -> Self {
+        Self {
+            value: value.into(),
+            keys,
+        }
+    }
+
+    /// Best score across the displayed value and every alias.
+    fn score(&self, query: &str) -> Option<Score> {
+        std::iter::once(&self.value)
+            .chain(&self.keys)
+            .filter_map(|k| score(k, query))
+            .max()
+    }
+}
+
 /// State of the palette while it is open.
 #[derive(Debug, Default)]
 pub struct Palette {
     /// Everything the palette could complete to.
-    pub candidates: Vec<String>,
-    /// Candidates matching the current input, best match first.
+    pub candidates: Vec<Candidate>,
+    /// Values matching the current input, best match first.
     pub matches: Vec<String>,
     /// Index into `matches`.
     pub selected: usize,
@@ -61,7 +97,7 @@ pub const MAX_VISIBLE: usize = 8;
 
 impl Palette {
     /// Replace the candidate set and re-rank against `query`.
-    pub fn reload(&mut self, candidates: Vec<String>, query: &str) {
+    pub fn reload(&mut self, candidates: Vec<Candidate>, query: &str) {
         self.candidates = candidates;
         self.refilter(query);
     }
@@ -69,15 +105,15 @@ impl Palette {
     /// Re-rank the candidates against the current input.
     pub fn refilter(&mut self, query: &str) {
         let needle = query.trim().to_ascii_lowercase();
-        let mut scored: Vec<(Score, &String)> = self
+        let mut scored: Vec<(Score, &str)> = self
             .candidates
             .iter()
-            .filter_map(|c| score(c, &needle).map(|s| (s, c)))
+            .filter_map(|c| c.score(&needle).map(|s| (s, c.value.as_str())))
             .collect();
         // Descending by score, then alphabetically so the list is stable
         // between keystrokes instead of jittering on equal scores.
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-        self.matches = scored.into_iter().map(|(_, c)| c.clone()).collect();
+        self.matches = scored.into_iter().map(|(_, c)| c.to_string()).collect();
         self.selected = 0;
     }
 
@@ -115,8 +151,42 @@ mod tests {
 
     fn palette(items: &[&str], query: &str) -> Vec<String> {
         let mut p = Palette::default();
-        p.reload(items.iter().map(|s| s.to_string()).collect(), query);
+        p.reload(items.iter().map(|s| Candidate::new(*s)).collect(), query);
         p.matches
+    }
+
+    fn keyed(items: &[(&str, &[&str])], query: &str) -> Vec<String> {
+        let mut p = Palette::default();
+        p.reload(
+            items
+                .iter()
+                .map(|(v, keys)| {
+                    Candidate::with_keys(*v, keys.iter().map(|k| k.to_string()).collect())
+                })
+                .collect(),
+            query,
+        );
+        p.matches
+    }
+
+    #[test]
+    fn a_short_name_beats_an_accidental_subsequence() {
+        // "pvc" is a subsequence of "apiservices" (a-P-iser-V-i-C-es), so
+        // without the alias the wrong kind would win.
+        let got = keyed(
+            &[
+                ("apiservices", &[]),
+                ("persistentvolumeclaims", &["persistentvolumeclaim", "pvc"]),
+            ],
+            "pvc",
+        );
+        assert_eq!(got.first().unwrap(), "persistentvolumeclaims");
+    }
+
+    #[test]
+    fn aliases_match_but_the_display_value_is_returned() {
+        let got = keyed(&[("pods", &["pod", "po"])], "po");
+        assert_eq!(got, vec!["pods"]);
     }
 
     #[test]
@@ -150,7 +220,7 @@ mod tests {
     #[test]
     fn selection_wraps_in_both_directions() {
         let mut p = Palette::default();
-        p.reload(vec!["a".into(), "b".into()], "");
+        p.reload(vec![Candidate::new("a"), Candidate::new("b")], "");
         p.move_selection(-1);
         assert_eq!(p.selected, 1);
         p.move_selection(1);
@@ -160,7 +230,12 @@ mod tests {
     #[test]
     fn visible_window_follows_the_selection() {
         let mut p = Palette::default();
-        p.reload((0..20).map(|i| format!("item{i:02}")).collect(), "");
+        p.reload(
+            (0..20)
+                .map(|i| Candidate::new(format!("item{i:02}")))
+                .collect(),
+            "",
+        );
         p.selected = 12;
         let (start, rows) = p.visible();
         assert_eq!(rows.len(), MAX_VISIBLE);
@@ -170,7 +245,7 @@ mod tests {
     #[test]
     fn visible_window_is_the_whole_list_when_it_fits() {
         let mut p = Palette::default();
-        p.reload(vec!["a".into(), "b".into()], "");
+        p.reload(vec![Candidate::new("a"), Candidate::new("b")], "");
         assert_eq!(p.visible(), (0, &["a".to_string(), "b".to_string()][..]));
     }
 }
