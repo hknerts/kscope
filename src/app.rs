@@ -397,7 +397,8 @@ impl App {
                 namespace: pod.namespace.clone(),
                 pod: pod.name.clone(),
                 container,
-                tail: self.config.logs.tail_lines,
+                tail: self.tail_lines(),
+                since_seconds: self.config.logs.since_seconds,
                 timestamps: self.timestamps,
                 previous: self.previous,
             };
@@ -412,6 +413,15 @@ impl App {
         self.view = View::Logs;
         self.pane = Pane::Content;
         self.dirty = true;
+    }
+
+    /// `None` asks for the container's entire retained history.
+    fn tail_lines(&self) -> Option<i64> {
+        if self.config.logs.tail_lines <= 0 {
+            None
+        } else {
+            Some(self.config.logs.tail_lines)
+        }
     }
 
     pub fn detach_all(&mut self) {
@@ -438,7 +448,8 @@ impl App {
                 namespace: namespace.to_string(),
                 pod: pod.to_string(),
                 container,
-                tail: self.config.logs.tail_lines,
+                tail: self.tail_lines(),
+                since_seconds: self.config.logs.since_seconds,
                 timestamps: self.timestamps,
                 previous: self.previous,
             };

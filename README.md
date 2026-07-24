@@ -58,10 +58,13 @@ docker run --rm -it -v ~/.kube:/home/nonroot/.kube:ro ghcr.io/kscope-tui/kscope:
 
 ```sh
 kscope                        # current context, current namespace
+                              # (full history from container start, nothing evicted)
 kscope -n payments            # a specific namespace
 kscope -A                     # every namespace you can read
 kscope --context staging      # a specific kubeconfig context
-kscope --tail 2000 --buffer 200000
+kscope --tail 2000            # only the last 2000 lines instead of everything
+kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
+kscope --since 3600           # only lines from the last hour
 kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 ```
 
@@ -89,6 +92,37 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `Ctrl-n` / `Ctrl-p` | change namespace / filter the pod list |
 | `m` / `S` | switch metric table / cycle sort order |
 
+## How far back can I scroll?
+
+By default, **all the way to the container's first line**. There are no limits
+on kscope's side:
+
+* On attach, kscope asks the API server for the container's entire retained
+  history (`tail_lines` unset), not a fixed tail.
+* The in-memory buffer is **unbounded** by default (`logs.buffer_lines = 0`), so
+  nothing is evicted for the lifetime of the session. `g` jumps to the first
+  line, always.
+* The status bar shows the live line count and the memory those lines occupy, so
+  an unbounded session cannot grow silently.
+
+Two limits are outside kscope's control, and it is worth knowing them:
+
+1. **Kubelet log rotation.** The API server can only return what is still on the
+   node. Kubelet rotates container logs at `containerLogMaxSize` (10 MiB by
+   default) and keeps `containerLogMaxFiles` (5 by default) of them. Anything
+   older is gone before any tool can read it — `kubectl logs` has the same
+   ceiling. For genuinely permanent history you need a log shipper.
+2. **Container restarts.** A restart starts a fresh log. Press `p` to read the
+   previous, crashed instance instead.
+
+If you would rather trade history for a memory ceiling, set a cap:
+
+```toml
+[logs]
+buffer_lines = 200000   # ring buffer; oldest lines are evicted
+tail_lines = 5000       # only fetch the last 5000 lines on attach
+```
+
 ## Configuration
 
 kscope runs with zero configuration. To customise it, drop a file at
@@ -96,8 +130,8 @@ kscope runs with zero configuration. To customise it, drop a file at
 
 ```toml
 [logs]
-buffer_lines = 100000
-tail_lines = 1000
+buffer_lines = 0     # 0 = unlimited (default): never evict
+tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
 
 [metrics]
@@ -139,8 +173,9 @@ The design targets pods that emit tens of thousands of lines per second:
 
 * Log lines arrive in **batches** (512 lines or 100 ms) so a chatty container
   cannot livelock the render loop.
-* Lines are stored in a **fixed-capacity ring buffer** and classified into a
-  severity level exactly once, on arrival.
+* Lines are classified into a severity level exactly once, on arrival, and
+  stored in an unbounded deque — or a fixed-capacity ring buffer if you set
+  `logs.buffer_lines`.
 * The filtered view is a list of line ids maintained **incrementally**; only a
   filter change costs a full pass.
 * Redraws are capped at `general.max_fps` (30 by default) and only happen when

@@ -13,8 +13,29 @@ fn line(text: &str) -> LogLine {
     LogLine::new(text.to_string(), Arc::from("ns/pod:container"))
 }
 
-/// A realistic ingest: 200 000 lines through a 50 000 line buffer, then a
-/// filter change, then a search. This is the whole hot path in one test.
+/// The default: an unbounded buffer keeps every line of the session, so the
+/// first line a container ever emitted is still reachable after a large ingest.
+#[test]
+fn default_buffer_retains_everything_from_the_first_line() {
+    let mut buffer = LogBuffer::new(0); // 0 == unlimited, the default
+
+    for i in 0..250_000u32 {
+        buffer.push(line(&format!("INFO handled request id={i}")));
+    }
+
+    assert_eq!(buffer.len(), 250_000);
+    assert_eq!(buffer.received, 250_000);
+    assert_eq!(buffer.dropped, 0, "an unbounded buffer must not evict");
+    assert!(buffer.capacity().is_none());
+
+    // The very first line is still there, and still searchable.
+    assert!(buffer.view_line(0).unwrap().raw.contains("id=0"));
+    let first = Regex::new("id=0$").unwrap();
+    assert_eq!(buffer.search_forward(0, &first), Some(0));
+}
+
+/// An explicit cap still behaves as a ring buffer: 200 000 lines through a
+/// 50 000 line buffer, then a filter change, then a search.
 #[test]
 fn ingests_a_large_stream_and_stays_bounded() {
     let mut buffer = LogBuffer::new(50_000);

@@ -1,5 +1,10 @@
 //! Log streaming.
 //!
+//! By default kscope requests the container's whole retained history — every
+//! line the kubelet still has, starting from container start — and then follows.
+//! `LogParams::tail_lines = None` is what asks for that; a `Some(n)` only ever
+//! narrows it.
+//!
 //! One task per attached container. Lines are **batched** before being sent to
 //! the UI (up to 512 lines or 100 ms, whichever comes first): a chatty pod can
 //! emit tens of thousands of lines per second and waking the render loop for
@@ -23,7 +28,11 @@ pub struct StreamSpec {
     pub pod: String,
     /// `None` streams the pod's default container.
     pub container: Option<String>,
-    pub tail: i64,
+    /// Number of trailing lines to request. `None` asks the API server for the
+    /// container's **entire** retained history, from the moment it started.
+    pub tail: Option<i64>,
+    /// Only return lines newer than this many seconds, if set.
+    pub since_seconds: Option<i64>,
     pub timestamps: bool,
     /// Read the logs of the previous, crashed instance.
     pub previous: bool,
@@ -64,7 +73,8 @@ pub fn spawn(
             let params = LogParams {
                 container: spec.container.clone(),
                 follow: true,
-                tail_lines: Some(spec.tail),
+                tail_lines: spec.tail,
+                since_seconds: spec.since_seconds,
                 timestamps: spec.timestamps,
                 previous: spec.previous,
                 ..Default::default()
@@ -173,7 +183,8 @@ pub async fn snapshot(client: kube::Client, spec: &StreamSpec) -> anyhow::Result
     let params = LogParams {
         container: spec.container.clone(),
         follow: false,
-        tail_lines: Some(spec.tail),
+        tail_lines: spec.tail,
+        since_seconds: spec.since_seconds,
         timestamps: spec.timestamps,
         previous: spec.previous,
         ..Default::default()
@@ -191,7 +202,8 @@ mod tests {
             namespace: "prod".into(),
             pod: "api-0".into(),
             container: Some("app".into()),
-            tail: 100,
+            tail: None,
+            since_seconds: None,
             timestamps: false,
             previous: false,
         };

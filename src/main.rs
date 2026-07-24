@@ -37,6 +37,9 @@ async fn main() -> Result<()> {
     if let Some(refresh) = cli.refresh {
         config.metrics.refresh_ms = refresh;
     }
+    if let Some(since) = cli.since {
+        config.logs.since_seconds = Some(since);
+    }
     if cli.timestamps {
         config.logs.timestamps = true;
     }
@@ -65,7 +68,12 @@ async fn main() -> Result<()> {
             },
             pod,
             container,
-            tail: config.logs.tail_lines,
+            tail: if config.logs.tail_lines <= 0 {
+                None
+            } else {
+                Some(config.logs.tail_lines)
+            },
+            since_seconds: config.logs.since_seconds,
             timestamps: config.logs.timestamps,
             previous: false,
         };

@@ -12,10 +12,15 @@ inventory_refresh_ms = 5000
 mouse = true
 
 [logs]
-# Lines kept in memory per session. 50k lines is roughly 10-15 MB.
-buffer_lines = 50000
-# History requested when attaching to a container.
-tail_lines = 500
+# Lines kept in memory. 0 (the default) means unlimited: nothing is ever
+# evicted, so you can always scroll back to the first line of the session.
+# Set a positive value to turn this into a ring buffer with a memory ceiling.
+buffer_lines = 0
+# History requested when attaching. 0 (the default) means everything the API
+# server still has, i.e. from the moment the container started.
+tail_lines = 0
+# Only fetch lines from the last N seconds. Omit for no limit.
+# since_seconds = 3600
 # Ask the API server for RFC3339 timestamps.
 timestamps = false
 follow = true
