@@ -159,6 +159,11 @@ pub struct App {
     pub config: Config,
     pub client: kube::Client,
     pub scope: Scope,
+    /// kubeconfig context/user and apiserver version, for the header. Best
+    /// effort — empty/"unknown" when running in-cluster or unreachable.
+    pub context_name: String,
+    pub user_name: String,
+    pub k8s_version: String,
 
     pub view: View,
     pub pane: Pane,
@@ -203,7 +208,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, client: kube::Client, scope: Scope, log_tx: Sender<LogEvent>) -> Self {
+    pub fn new(
+        config: Config,
+        client: kube::Client,
+        scope: Scope,
+        log_tx: Sender<LogEvent>,
+        context_name: String,
+        user_name: String,
+        k8s_version: String,
+    ) -> Self {
         let highlighter = Highlighter::new(&config.theme, &config.highlight);
         let buffer = LogBuffer::new(config.logs.buffer_lines);
         let metrics = MetricsStore::new(config.metrics.history);
@@ -215,6 +228,9 @@ impl App {
             config,
             client,
             scope,
+            context_name,
+            user_name,
+            k8s_version,
             view: View::Logs,
             pane: Pane::Sidebar,
             mode: InputMode::Normal,
@@ -807,15 +823,19 @@ impl App {
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::PageDown => self.move_cursor(self.viewport_height as isize),
-            KeyCode::PageUp => self.move_cursor(-(self.viewport_height as isize)),
+            KeyCode::PageDown | KeyCode::Right => {
+                self.move_cursor(self.viewport_height as isize)
+            }
+            KeyCode::PageUp | KeyCode::Left => {
+                self.move_cursor(-(self.viewport_height as isize))
+            }
             KeyCode::Char('g') | KeyCode::Home => self.goto_start(),
             KeyCode::Char('G') | KeyCode::End => self.goto_end(),
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Char('[') => {
                 self.h_scroll = self.h_scroll.saturating_sub(8);
                 self.dirty = true;
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Char(']') => {
                 self.h_scroll = (self.h_scroll + 8).min(4096);
                 self.dirty = true;
             }
@@ -844,7 +864,7 @@ impl App {
                 let msg = if self.wrap { "wrap on" } else { "wrap off" };
                 self.set_status(msg, StatusKind::Info);
             }
-            KeyCode::Char('L') => {
+            KeyCode::Char('l') => {
                 let mut filter = self.buffer.filter.clone();
                 filter.min_level = Level::next_threshold(filter.min_level);
                 let label = filter.min_level.label();

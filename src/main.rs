@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         config.logs.timestamps = true;
     }
 
-    let (client, default_ns) = k8s::connect(cli.context.as_deref())
+    let (client, default_ns, context_name, user_name) = k8s::connect(cli.context.as_deref())
         .await
         .context("could not reach the cluster")?;
 
@@ -82,7 +82,15 @@ async fn main() -> Result<()> {
     }
 
     let mut terminal = setup_terminal(config.general.mouse)?;
-    let result = run(&mut terminal, config, client, scope).await;
+    let result = run(
+        &mut terminal,
+        config,
+        client,
+        scope,
+        context_name,
+        user_name,
+    )
+    .await;
     restore_terminal(&mut terminal)?;
     result
 }
@@ -141,7 +149,14 @@ fn init_tracing(cli: &Cli) {
     }
 }
 
-async fn run(terminal: &mut Tui, config: Config, client: kube::Client, scope: Scope) -> Result<()> {
+async fn run(
+    terminal: &mut Tui,
+    config: Config,
+    client: kube::Client,
+    scope: Scope,
+    context_name: String,
+    user_name: String,
+) -> Result<()> {
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1024);
     let (inv_tx, mut inv_rx) = tokio::sync::mpsc::channel(16);
     let (met_tx, mut met_rx) = tokio::sync::mpsc::channel(16);
@@ -163,8 +178,9 @@ async fn run(terminal: &mut Tui, config: Config, client: kube::Client, scope: Sc
         met_tx,
     );
 
+    let k8s_version = k8s::server_version(&client).await;
     let mut input = event::spawn();
-    let mut app = App::new(config, client, scope, log_tx);
+    let mut app = App::new(config, client, scope, log_tx, context_name, user_name, k8s_version);
 
     // Draw once immediately so the user sees the shell before the first poll.
     terminal.draw(|f| ui::draw(f, &mut app))?;

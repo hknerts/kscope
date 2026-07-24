@@ -14,8 +14,11 @@ use kube::config::{KubeConfigOptions, Kubeconfig};
 /// Connect to the cluster, honouring `--context` and the usual kubeconfig or
 /// in-cluster environment discovery.
 ///
-/// Returns the client alongside the namespace configured for the context.
-pub async fn connect(context: Option<&str>) -> Result<(kube::Client, String)> {
+/// Returns the client, the namespace configured for the context, and — best
+/// effort, purely for display in the header — the context and kubeconfig
+/// user names. Those are empty when running in-cluster, where there is no
+/// kubeconfig to read them from.
+pub async fn connect(context: Option<&str>) -> Result<(kube::Client, String, String, String)> {
     let config = match context {
         Some(ctx) => {
             let kubeconfig = Kubeconfig::read().context("reading kubeconfig")?;
@@ -33,7 +36,31 @@ pub async fn connect(context: Option<&str>) -> Result<(kube::Client, String)> {
     };
     let namespace = config.default_namespace.clone();
     let client = kube::Client::try_from(config).context("building kubernetes client")?;
-    Ok((client, namespace))
+
+    let kubeconfig = Kubeconfig::read().ok();
+    let context_name = context
+        .map(str::to_string)
+        .or_else(|| kubeconfig.as_ref().and_then(|k| k.current_context.clone()))
+        .unwrap_or_else(|| "in-cluster".to_string());
+    let user_name = kubeconfig
+        .as_ref()
+        .and_then(|k| k.contexts.iter().find(|c| c.name == context_name))
+        .and_then(|c| c.context.as_ref())
+        .map(|ctx| ctx.user.clone())
+        .unwrap_or_default();
+
+    Ok((client, namespace, context_name, user_name))
+}
+
+/// Best-effort apiserver version string (e.g. "v1.30.2"), for the header.
+/// Never fails the whole app — an unreachable `/version` endpoint just shows
+/// as "unknown".
+pub async fn server_version(client: &kube::Client) -> String {
+    client
+        .apiserver_version()
+        .await
+        .map(|info| info.git_version)
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// A container inside a pod, as seen by the inventory poller.
