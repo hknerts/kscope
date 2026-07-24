@@ -84,16 +84,12 @@ fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
     let last_start = hay.len() - needle.len();
     let mut i = 0usize;
     while i <= last_start {
-        match memchr::memchr2(lower, upper, &hay[i..=last_start]) {
-            Some(p) => {
-                let start = i + p;
-                if hay[start..start + needle.len()].eq_ignore_ascii_case(needle) {
-                    return Some(start);
-                }
-                i = start + 1;
-            }
-            None => return None,
+        let p = memchr::memchr2(lower, upper, &hay[i..=last_start])?;
+        let start = i + p;
+        if hay[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(start);
         }
+        i = start + 1;
     }
     None
 }
@@ -323,10 +319,7 @@ impl LogBuffer {
     /// bar so an unbounded session cannot silently eat the machine.
     pub fn memory_bytes(&self) -> usize {
         const OVERHEAD: usize = std::mem::size_of::<LogLine>();
-        self.lines
-            .iter()
-            .map(|l| l.raw.len() + OVERHEAD)
-            .sum()
+        self.lines.iter().map(|l| l.raw.len() + OVERHEAD).sum()
     }
 
     pub fn len(&self) -> usize {
@@ -634,8 +627,10 @@ mod tests {
             };
             buf.push(line(&text));
         }
-        let mut f = Filter::default();
-        f.errors_only = true;
+        let f = Filter {
+            errors_only: true,
+            ..Filter::default()
+        };
         buf.set_filter(f);
         let after_rebuild = buf.view_len();
         buf.push(line("ERROR one more"));
