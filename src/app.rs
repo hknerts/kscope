@@ -60,19 +60,30 @@ impl InputMode {
 /// A row in the resource sidebar.
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
+    /// Header for pods sharing an owning workload (Deployment, StatefulSet,
+    /// DaemonSet, Job, ...). Not itself a pod — `Enter` collapses/expands it.
+    Group {
+        key: String,
+        kind: String,
+        name: String,
+    },
     Pod { key: String, pod: usize },
     Container { key: String, pod: usize, name: String },
 }
 
 impl SidebarItem {
-    pub fn pod_index(&self) -> usize {
+    /// `None` for group headers, which have no backing pod.
+    pub fn pod_index(&self) -> Option<usize> {
         match self {
-            SidebarItem::Pod { pod, .. } | SidebarItem::Container { pod, .. } => *pod,
+            SidebarItem::Pod { pod, .. } | SidebarItem::Container { pod, .. } => Some(*pod),
+            SidebarItem::Group { .. } => None,
         }
     }
     pub fn key(&self) -> &str {
         match self {
-            SidebarItem::Pod { key, .. } | SidebarItem::Container { key, .. } => key,
+            SidebarItem::Group { key, .. }
+            | SidebarItem::Pod { key, .. }
+            | SidebarItem::Container { key, .. } => key,
         }
     }
 }
@@ -141,6 +152,7 @@ impl SortBy {
 pub enum MetricPane {
     Nodes,
     Pods,
+    Volumes,
 }
 
 pub struct App {
@@ -158,6 +170,7 @@ pub struct App {
     pub sidebar_selected: usize,
     pub sidebar_offset: usize,
     pub expanded: HashSet<String>,
+    pub collapsed_groups: HashSet<String>,
     pub pod_filter: Option<String>,
 
     pub buffer: LogBuffer,
@@ -176,6 +189,7 @@ pub struct App {
     pub metric_pane: MetricPane,
     pub node_selected: usize,
     pub pod_metric_selected: usize,
+    pub volume_selected: usize,
     pub sort_by: SortBy,
 
     pub attached: Vec<Arc<str>>,
@@ -210,6 +224,7 @@ impl App {
             sidebar_selected: 0,
             sidebar_offset: 0,
             expanded: HashSet::new(),
+            collapsed_groups: HashSet::new(),
             pod_filter: None,
             buffer,
             highlighter,
@@ -221,6 +236,7 @@ impl App {
             metric_pane: MetricPane::Pods,
             node_selected: 0,
             pod_metric_selected: 0,
+            volume_selected: 0,
             sort_by: SortBy::Cpu,
             attached: Vec::new(),
             streams: HashMap::new(),
@@ -305,7 +321,23 @@ impl App {
             .map(|i| i.key().to_string());
 
         let needle = self.pod_filter.as_deref().map(str::to_ascii_lowercase);
-        let mut items = Vec::with_capacity(self.inventory.pods.len() * 2);
+
+        // Bucket pods under their owning workload, preserving first-seen
+        // order so the sidebar stays close to the existing namespace/name
+        // sort. Pods without a recognised owner render exactly as before —
+        // no header, just the pod row.
+        enum Entry {
+            Standalone(usize),
+            Group(String),
+        }
+        struct Group {
+            kind: String,
+            name: String,
+            pods: Vec<usize>,
+        }
+
+        let mut entries: Vec<Entry> = Vec::with_capacity(self.inventory.pods.len());
+        let mut groups: HashMap<String, Group> = HashMap::new();
         for (idx, pod) in self.inventory.pods.iter().enumerate() {
             if let Some(n) = &needle {
                 if !pod.name.to_ascii_lowercase().contains(n)
@@ -314,6 +346,30 @@ impl App {
                     continue;
                 }
             }
+            if pod.owner_kind.is_empty() || pod.owner_name.is_empty() {
+                entries.push(Entry::Standalone(idx));
+                continue;
+            }
+            let gkey = format!("{}/{}/{}", pod.namespace, pod.owner_kind, pod.owner_name);
+            match groups.get_mut(&gkey) {
+                Some(g) => g.pods.push(idx),
+                None => {
+                    groups.insert(
+                        gkey.clone(),
+                        Group {
+                            kind: pod.owner_kind.clone(),
+                            name: pod.owner_name.clone(),
+                            pods: vec![idx],
+                        },
+                    );
+                    entries.push(Entry::Group(gkey));
+                }
+            }
+        }
+
+        let mut items = Vec::with_capacity(self.inventory.pods.len() * 2);
+        let push_pod = |items: &mut Vec<SidebarItem>, idx: usize| {
+            let pod = &self.inventory.pods[idx];
             let key = pod.key();
             let expanded = self.expanded.contains(&key);
             items.push(SidebarItem::Pod {
@@ -327,6 +383,24 @@ impl App {
                         pod: idx,
                         name: c.name.clone(),
                     });
+                }
+            }
+        };
+        for entry in entries {
+            match entry {
+                Entry::Standalone(idx) => push_pod(&mut items, idx),
+                Entry::Group(gkey) => {
+                    let group = &groups[&gkey];
+                    items.push(SidebarItem::Group {
+                        key: gkey.clone(),
+                        kind: group.kind.clone(),
+                        name: group.name.clone(),
+                    });
+                    if !self.collapsed_groups.contains(&gkey) {
+                        for &idx in &group.pods {
+                            push_pod(&mut items, idx);
+                        }
+                    }
                 }
             }
         }
@@ -344,7 +418,7 @@ impl App {
 
     pub fn selected_pod(&self) -> Option<&PodInfo> {
         let item = self.sidebar.get(self.sidebar_selected)?;
-        self.inventory.pods.get(item.pod_index())
+        self.inventory.pods.get(item.pod_index()?)
     }
 
     // ------------------------------------------------------------------ logs
@@ -378,7 +452,11 @@ impl App {
             self.set_status("nothing selected", StatusKind::Warn);
             return;
         };
-        let Some(pod) = self.inventory.pods.get(item.pod_index()).cloned() else {
+        let Some(pod_idx) = item.pod_index() else {
+            self.set_status("select a pod, not a workload group", StatusKind::Warn);
+            return;
+        };
+        let Some(pod) = self.inventory.pods.get(pod_idx).cloned() else {
             return;
         };
 
@@ -391,6 +469,15 @@ impl App {
                 .map(|c| Some(c.name.clone()))
                 .collect(),
         };
+
+        // Picking a single container (`Enter` on a container row) switches
+        // the view to just that container's logs. Bulk-attaching (`a`) stays
+        // additive — that is the merged multi-container view.
+        if matches!(item, SidebarItem::Container { .. }) && !all_containers {
+            self.detach_all();
+            self.buffer.clear();
+            self.scroll = 0;
+        }
 
         for container in containers {
             let spec = StreamSpec {
@@ -815,7 +902,8 @@ impl App {
             KeyCode::Char('m') => {
                 self.metric_pane = match self.metric_pane {
                     MetricPane::Nodes => MetricPane::Pods,
-                    MetricPane::Pods => MetricPane::Nodes,
+                    MetricPane::Pods => MetricPane::Volumes,
+                    MetricPane::Volumes => MetricPane::Nodes,
                 };
                 self.dirty = true;
             }
@@ -943,6 +1031,14 @@ impl App {
                                 as usize;
                         }
                     }
+                    MetricPane::Volumes => {
+                        let len = self.inventory.volumes.len();
+                        if len > 0 {
+                            self.volume_selected = (self.volume_selected as isize + delta)
+                                .clamp(0, len as isize - 1)
+                                as usize;
+                        }
+                    }
                 }
                 self.dirty = true;
             }
@@ -979,6 +1075,13 @@ impl App {
             return;
         };
         match item {
+            SidebarItem::Group { key, .. } => {
+                if !self.collapsed_groups.remove(&key) {
+                    self.collapsed_groups.insert(key);
+                }
+                self.rebuild_sidebar();
+                self.dirty = true;
+            }
             SidebarItem::Pod { key, .. } => {
                 if !self.expanded.remove(&key) {
                     self.expanded.insert(key);

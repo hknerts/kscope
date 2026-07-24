@@ -61,7 +61,7 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
     (
         "metrics",
         &[
-            ("m", "switch between the node and pod tables"),
+            ("m", "cycle the node, pod and volume tables"),
             ("S", "cycle sort: name / cpu / memory"),
         ],
     ),

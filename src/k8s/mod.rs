@@ -60,6 +60,12 @@ pub struct PodInfo {
     pub phase: String,
     pub age_seconds: i64,
     pub containers: Vec<ContainerInfo>,
+    /// Owning workload kind (e.g. "Deployment", "StatefulSet", "DaemonSet",
+    /// "Job"), resolved past the intermediate ReplicaSet where relevant.
+    /// Empty for standalone pods.
+    pub owner_kind: String,
+    /// Owning workload name. Empty for standalone pods.
+    pub owner_name: String,
 }
 
 impl PodInfo {
@@ -87,6 +93,27 @@ impl PodInfo {
     }
 }
 
+/// A PersistentVolumeClaim, as seen by the inventory poller. Capacity only —
+/// kscope reads the Kubernetes API objects, not kubelet's stats/summary, so
+/// there is no live "bytes actually used" figure here.
+#[derive(Debug, Clone, Default)]
+pub struct VolumeInfo {
+    pub namespace: String,
+    pub name: String,
+    pub phase: String,
+    pub capacity_bytes: f64,
+    pub requested_bytes: f64,
+    pub storage_class: String,
+    pub access_modes: String,
+    pub used_by: Vec<String>,
+}
+
+impl VolumeInfo {
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.namespace, self.name)
+    }
+}
+
 /// A node, as seen by the inventory poller.
 #[derive(Debug, Clone, Default)]
 pub struct NodeInfo {
@@ -106,6 +133,7 @@ pub struct Inventory {
     pub namespaces: Vec<String>,
     pub pods: Vec<PodInfo>,
     pub nodes: Vec<NodeInfo>,
+    pub volumes: Vec<VolumeInfo>,
 }
 
 /// Format an age in seconds the way kubectl does.
