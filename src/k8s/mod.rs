@@ -46,7 +46,7 @@ pub async fn connect(context: Option<&str>) -> Result<(kube::Client, String, Str
         .as_ref()
         .and_then(|k| k.contexts.iter().find(|c| c.name == context_name))
         .and_then(|c| c.context.as_ref())
-        .map(|ctx| ctx.user.clone())
+        .and_then(|ctx| ctx.user.clone())
         .unwrap_or_default();
 
     Ok((client, namespace, context_name, user_name))

@@ -198,7 +198,7 @@ fn convert_pod(pod: Pod, now: chrono::DateTime<chrono::Utc>) -> (PodInfo, Vec<St
     let age_seconds = meta
         .creation_timestamp
         .as_ref()
-        .map(|t| (now - t.0).num_seconds())
+        .map(|t| now.timestamp() - t.0.as_second())
         .unwrap_or(0);
 
     let mut statuses: BTreeMap<String, (bool, i32, String)> = BTreeMap::new();
