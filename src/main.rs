@@ -18,9 +18,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::cli::Cli;
-use app::App;
+use app::{App, ContextEntry};
 use config::Config;
 use k8s::discovery::Scope;
+use k8s::resources::{ResourceRow, ResourceType};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -149,6 +150,52 @@ fn init_tracing(cli: &Cli) {
     }
 }
 
+/// The three background pollers, kept together so a context switch can tear
+/// them all down and bring them back up against the new cluster.
+struct Pollers {
+    inventory: tokio::task::JoinHandle<()>,
+    metrics: tokio::task::JoinHandle<()>,
+    events: tokio::task::JoinHandle<()>,
+}
+
+impl Pollers {
+    fn spawn(
+        client: &kube::Client,
+        scope: &Scope,
+        config: &Config,
+        inv_tx: tokio::sync::mpsc::Sender<k8s::discovery::Update>,
+        met_tx: tokio::sync::mpsc::Sender<k8s::metrics::MetricsEvent>,
+        evt_tx: tokio::sync::mpsc::Sender<k8s::events::EventUpdate>,
+    ) -> Self {
+        Self {
+            inventory: k8s::discovery::spawn(
+                client.clone(),
+                scope.clone(),
+                Duration::from_millis(config.general.inventory_refresh_ms),
+                inv_tx,
+            ),
+            metrics: k8s::metrics::spawn(
+                client.clone(),
+                scope.clone(),
+                Duration::from_millis(config.metrics.refresh_ms),
+                met_tx,
+            ),
+            events: k8s::events::spawn(
+                client.clone(),
+                scope.clone(),
+                Duration::from_millis(config.general.events_refresh_ms),
+                evt_tx,
+            ),
+        }
+    }
+
+    fn abort(&self) {
+        self.inventory.abort();
+        self.metrics.abort();
+        self.events.abort();
+    }
+}
+
 async fn run(
     terminal: &mut Tui,
     config: Config,
@@ -160,16 +207,28 @@ async fn run(
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1024);
     let (inv_tx, mut inv_rx) = tokio::sync::mpsc::channel(16);
     let (met_tx, mut met_rx) = tokio::sync::mpsc::channel(16);
+    let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(16);
+    // Resource listings are one-shot requests rather than a poller, so they
+    // get their own channel and a task spawned per refresh.
+    let (row_tx, mut row_rx) = tokio::sync::mpsc::channel::<Result<Vec<ResourceRow>, String>>(8);
+    let (type_tx, mut type_rx) = tokio::sync::mpsc::channel::<Vec<ResourceType>>(4);
 
-    let inventory_interval = Duration::from_millis(config.general.inventory_refresh_ms);
-    let metrics_interval = Duration::from_millis(config.metrics.refresh_ms);
     let frame_budget = Duration::from_millis(1000 / config.general.max_fps.max(1) as u64);
 
-    let inventory_task =
-        k8s::discovery::spawn(client.clone(), scope.clone(), inventory_interval, inv_tx);
-    let metrics_task = k8s::metrics::spawn(client.clone(), scope.clone(), metrics_interval, met_tx);
+    let mut pollers = Pollers::spawn(
+        &client,
+        &scope,
+        &config,
+        inv_tx.clone(),
+        met_tx.clone(),
+        evt_tx.clone(),
+    );
 
     let k8s_version = k8s::server_version(&client).await;
+    let contexts = k8s::resources::contexts()
+        .into_iter()
+        .map(|(name, cluster)| ContextEntry { name, cluster })
+        .collect();
     let mut input = event::spawn();
     let mut app = App::new(
         config,
@@ -179,13 +238,18 @@ async fn run(
         context_name,
         user_name,
         k8s_version,
+        contexts,
     );
+
+    spawn_discovery(&app.client, type_tx.clone());
 
     // Draw once immediately so the user sees the shell before the first poll.
     terminal.draw(|f| ui::draw(f, &mut app))?;
     let mut last_draw = Instant::now();
     let mut ticker = tokio::time::interval(frame_budget);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `loading` is edge-triggered: the app raises it, we service it once.
+    let mut listing = false;
 
     loop {
         tokio::select! {
@@ -195,12 +259,79 @@ async fn run(
             Some(update) = inv_rx.recv() => app.on_update(update),
             Some(batch) = log_rx.recv() => app.on_log(batch),
             Some(sample) = met_rx.recv() => app.on_metrics(sample),
+            Some(events) = evt_rx.recv() => app.on_events(events),
+            Some(types) = type_rx.recv() => {
+                app.on_resource_types(types);
+                app.request_rows();
+            }
+            Some(rows) = row_rx.recv() => {
+                listing = false;
+                app.on_rows(rows);
+            }
             _ = ticker.tick() => {}
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
         }
 
         if app.should_quit {
             break;
+        }
+
+        // A context switch rebuilds the client and everything hanging off it.
+        if let Some(context) = app.pending_context.take() {
+            match k8s::connect(Some(&context)).await {
+                Ok((new_client, default_ns, new_context, new_user)) => {
+                    pollers.abort();
+                    let new_scope = Scope::Namespace(default_ns);
+                    let version = k8s::server_version(&new_client).await;
+                    pollers = Pollers::spawn(
+                        &new_client,
+                        &new_scope,
+                        &app.config,
+                        inv_tx.clone(),
+                        met_tx.clone(),
+                        evt_tx.clone(),
+                    );
+                    spawn_discovery(&new_client, type_tx.clone());
+                    app.adopt_context(new_client, new_scope, new_context, new_user, version);
+                    listing = false;
+                }
+                Err(err) => app.set_status(
+                    format!("could not switch to {context}: {err}"),
+                    app::StatusKind::Error,
+                ),
+            }
+        }
+
+        // A namespace change re-scopes the pollers without touching the client.
+        if std::mem::take(&mut app.pollers_stale) {
+            pollers.abort();
+            pollers = Pollers::spawn(
+                &app.client,
+                &app.scope,
+                &app.config,
+                inv_tx.clone(),
+                met_tx.clone(),
+                evt_tx.clone(),
+            );
+        }
+
+        // Service a pending list request. Guarded so holding `Ctrl-r` cannot
+        // pile up overlapping requests against the API server.
+        if app.loading && !listing {
+            if let Some(kind) = app.current_type().cloned() {
+                listing = true;
+                let client = app.client.clone();
+                let scope = app.scope.clone();
+                let tx = row_tx.clone();
+                tokio::spawn(async move {
+                    let result = k8s::resources::list(&client, &kind, &scope)
+                        .await
+                        .map_err(|e| format!("listing {}: {e}", kind.name()));
+                    let _ = tx.send(result).await;
+                });
+            } else {
+                app.loading = false;
+            }
         }
 
         // Coalesce bursts: a pod emitting 50k lines/s still redraws at most
@@ -212,8 +343,18 @@ async fn run(
         }
     }
 
-    inventory_task.abort();
-    metrics_task.abort();
+    pollers.abort();
     app.detach_all();
     Ok(())
+}
+
+/// Discovery is a burst of requests, so it runs off the UI thread and reports
+/// back when it is done. A failure just leaves the palette empty.
+fn spawn_discovery(client: &kube::Client, tx: tokio::sync::mpsc::Sender<Vec<ResourceType>>) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        if let Ok(types) = k8s::resources::discover(&client).await {
+            let _ = tx.send(types).await;
+        }
+    });
 }

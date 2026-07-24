@@ -12,13 +12,13 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::{App, Pane, View};
+use crate::app::{App, RightMode, View};
 use crate::config::Theme;
 use crate::logs::Level;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.config.theme;
-    let focused = app.pane == Pane::Content && app.view == View::Logs;
+    let focused = app.right == RightMode::Detail && app.view == View::Logs;
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -55,9 +55,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("  ↑/↓ or j/k   select a pod in the sidebar"),
-            Line::from("  Enter        expand a pod / attach a container"),
-            Line::from("  a            attach every container of the pod"),
+            Line::from("  :pods        logs are only served for pods"),
+            Line::from("  Esc          back to the list"),
+            Line::from("  Enter        open a pod to stream it"),
             Line::from("  ?            all key bindings"),
         ];
         f.render_widget(Paragraph::new(hint), inner);

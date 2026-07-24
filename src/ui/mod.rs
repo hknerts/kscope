@@ -1,20 +1,25 @@
 //! Rendering. Pure functions of [`App`] state — nothing here mutates the world
 //! except the viewport height, which the log view reports back so paging knows
 //! how far a "page" is.
+//!
+//! Two panes: contexts on the left, and on the right either the resource
+//! browser or, once something is opened, its logs / metrics / events.
 
+mod contexts;
+mod events;
 mod help;
 mod logs;
 mod metrics;
+mod resources;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, InputMode, Pane, SidebarItem, StatusKind, View};
+use crate::app::{App, InputMode, Pane, RightMode, StatusKind, View};
 use crate::config::Theme;
-use crate::k8s::fmt_age;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -31,20 +36,129 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(20)])
+        .constraints([Constraint::Length(28), Constraint::Min(20)])
         .split(chunks[1]);
 
-    draw_sidebar(f, app, body[0]);
-    match app.view {
-        View::Logs => logs::draw(f, app, body[1]),
-        View::Metrics => metrics::draw(f, app, body[1]),
+    contexts::draw(f, app, body[0]);
+    match app.right {
+        RightMode::Browse => resources::draw(f, app, body[1]),
+        RightMode::Detail => draw_detail(f, app, body[1]),
     }
 
     draw_status(f, app, chunks[2]);
 
+    // The completion dropdown floats above the content, anchored to the
+    // prompt at the bottom of the screen.
+    if app.mode == InputMode::Command {
+        draw_completions(f, app, chunks[1]);
+    }
+
     if app.mode == InputMode::Help {
         help::draw(f, app, area);
     }
+}
+
+/// The detail pane: a tab strip naming the opened object, then the tab body.
+fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = &app.config.theme;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .split(area);
+
+    let dim = Style::default().fg(Theme::color(&theme.trace));
+    let tab = |label: &'static str, active: bool| {
+        if active {
+            Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(Theme::color(&theme.match_fg))
+                    .bg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {label} "), dim)
+        }
+    };
+
+    let subject = app
+        .selected_row()
+        .map(|r| r.key())
+        .unwrap_or_else(|| "—".into());
+    let mut spans = vec![
+        Span::styled(
+            format!(" {} ", truncate(&subject, 40)),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        tab("1:logs", app.view == View::Logs),
+        tab("2:metrics", app.view == View::Metrics),
+        tab("3:events", app.view == View::Events),
+    ];
+    spans.push(Span::styled("   Esc: back", dim));
+    f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+
+    match app.view {
+        View::Logs => logs::draw(f, app, rows[1]),
+        View::Metrics => metrics::draw(f, app, rows[1]),
+        View::Events => events::draw(f, app, rows[1]),
+    }
+}
+
+/// The `:` palette's completion list, drawn as a dropdown sitting directly on
+/// top of the prompt line.
+fn draw_completions(f: &mut Frame, app: &App, body: Rect) {
+    let theme = &app.config.theme;
+    let (start, rows) = app.palette.visible();
+    if rows.is_empty() {
+        return;
+    }
+
+    // +2 for the border. Anchor to the bottom of the body so the list grows
+    // upwards out of the prompt, never off the top of the screen.
+    let height = (rows.len() as u16 + 2).min(body.height);
+    let width = rows
+        .iter()
+        .map(|r| r.chars().count() as u16 + 4)
+        .max()
+        .unwrap_or(20)
+        .clamp(24, body.width);
+    let area = Rect {
+        x: body.x,
+        y: body.y + body.height.saturating_sub(height),
+        width,
+        height,
+    };
+    f.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| {
+            let selected = start + i == app.palette.selected;
+            let style = if selected {
+                Style::default()
+                    .bg(theme.accent())
+                    .fg(Theme::color(&theme.match_fg))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::color(&theme.fg))
+            };
+            ListItem::new(Line::from(Span::styled(format!(" {candidate}"), style)))
+        })
+        .collect();
+
+    let title = format!(" {} match ", app.palette.matches.len());
+    f.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border_focus()))
+                .title(title),
+        ),
+        area,
+    );
 }
 
 /// The kscope wordmark as a small binoculars glyph — five rows so it has
@@ -93,20 +207,6 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(Theme::color(&theme.trace));
     let fg = Style::default().fg(Theme::color(&theme.fg));
 
-    let tab = |label: &'static str, active: bool| {
-        if active {
-            Span::styled(
-                format!(" {label} "),
-                Style::default()
-                    .fg(Theme::color(&theme.match_fg))
-                    .bg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(format!(" {label} "), dim)
-        }
-    };
-
     let (cpu_used, cpu_cap, mem_used, mem_cap) = app.metrics.cluster_totals();
     let field = |label: &'static str, value: &str| {
         let value = if value.is_empty() { "-" } else { value }.to_string();
@@ -119,8 +219,7 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
     let lines = vec![
         Line::from(vec![
             Span::styled(" kscope ", accent),
-            tab("1:logs", app.view == View::Logs),
-            tab("2:metrics", app.view == View::Metrics),
+            Span::styled(format!(":{} ", app.resource_label()), fg),
         ]),
         field("context", &app.context_name),
         field("k8s", &app.k8s_version),
@@ -128,8 +227,8 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(" ns:", dim),
             Span::styled(truncate(app.scope.label(), 10), fg),
-            Span::styled("  pods:", dim),
-            Span::styled(app.inventory.pods.len().to_string(), fg),
+            Span::styled("  items:", dim),
+            Span::styled(app.rows.len().to_string(), fg),
             Span::styled("  nodes:", dim),
             Span::styled(app.inventory.nodes.len().to_string(), fg),
             Span::styled("  cpu:", dim),
@@ -179,28 +278,38 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let label = Style::default().fg(Theme::color(&theme.trace));
 
-    let mut bindings: Vec<(&str, &str)> = vec![("Tab", "pane"), ("1/2", "view")];
-    if app.pane == Pane::Sidebar {
-        bindings.push(("j/k", "move"));
-        bindings.push(("Enter", "open/expand"));
-        bindings.push(("a/x", "attach/detach"));
-        bindings.push(("Ctrl-n", "namespace"));
-        bindings.push(("Ctrl-p", "filter pods"));
-    } else {
-        match app.view {
-            View::Logs => {
-                bindings.push(("j/k", "scroll"));
-                bindings.push(("/", "search"));
-                bindings.push(("\\", "filter"));
-                bindings.push(("L/e", "level/errors"));
-                bindings.push(("F/w", "follow/wrap"));
-                bindings.push(("t/p", "time/prev"));
-                bindings.push(("c/s", "clear/save"));
-            }
-            View::Metrics => {
-                bindings.push(("j/k", "move"));
-                bindings.push(("m", "cycle tables"));
-                bindings.push(("S", "sort"));
+    let mut bindings: Vec<(&str, &str)> = vec![(":", "resource"), ("Tab", "pane")];
+    match (app.pane, app.right) {
+        (Pane::Contexts, _) => {
+            bindings.push(("j/k", "move"));
+            bindings.push(("Enter", "switch context"));
+        }
+        (Pane::Resources, RightMode::Browse) => {
+            bindings.push(("j/k", "move"));
+            bindings.push(("Enter", "open"));
+            bindings.push(("/", "filter list"));
+            bindings.push(("Ctrl-n", "namespace"));
+            bindings.push(("Ctrl-r", "refresh"));
+        }
+        (Pane::Resources, RightMode::Detail) => {
+            bindings.push(("1/2/3", "logs/metrics/events"));
+            bindings.push(("Esc", "back to list"));
+            match app.view {
+                View::Logs => {
+                    bindings.push(("/", "search"));
+                    bindings.push(("\\", "filter"));
+                    bindings.push(("L/e", "level/errors"));
+                    bindings.push(("F/w", "follow/wrap"));
+                    bindings.push(("t/p", "time/prev"));
+                    bindings.push(("c/s", "clear/save"));
+                }
+                View::Metrics => {
+                    bindings.push(("m", "cycle tables"));
+                    bindings.push(("S", "sort"));
+                }
+                View::Events => {
+                    bindings.push(("W", "warnings only"));
+                }
             }
         }
     }
@@ -240,141 +349,6 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    let theme = &app.config.theme;
-    let focused = app.pane == Pane::Sidebar;
-    let border = if focused {
-        theme.border_focus()
-    } else {
-        theme.border()
-    };
-
-    let title = match &app.pod_filter {
-        Some(f) => format!(" pods /{f}/ "),
-        None => " pods ".to_string(),
-    };
-
-    let mut items: Vec<ListItem> = Vec::with_capacity(app.sidebar.len());
-    for item in &app.sidebar {
-        match item {
-            SidebarItem::Group { key, kind, name } => {
-                let marker = if app.collapsed_groups.contains(key) {
-                    "▸"
-                } else {
-                    "▾"
-                };
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled(format!("{marker} "), Style::default().fg(theme.border())),
-                    Span::styled(
-                        truncate(name, 22),
-                        Style::default()
-                            .fg(theme.accent())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" {kind}"),
-                        Style::default().fg(Theme::color(&theme.trace)),
-                    ),
-                ])));
-            }
-            SidebarItem::Pod { pod, key } => {
-                let Some(info) = app.inventory.pods.get(*pod) else {
-                    continue;
-                };
-                let (ready, total) = info.ready();
-                let marker = if app.expanded.contains(key) {
-                    "▾"
-                } else {
-                    "▸"
-                };
-                let color = if info.healthy() {
-                    Theme::color(&theme.info)
-                } else {
-                    theme.error()
-                };
-                let indent = if info.owner_kind.is_empty() { "" } else { "  " };
-                items.push(ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(format!("{marker} "), Style::default().fg(theme.border())),
-                    Span::styled(truncate(&info.name, 20), Style::default().fg(color)),
-                    Span::styled(
-                        format!(
-                            " {ready}/{total} ↺{} {}",
-                            info.restarts(),
-                            fmt_age(info.age_seconds)
-                        ),
-                        Style::default().fg(Theme::color(&theme.trace)),
-                    ),
-                ])));
-            }
-            SidebarItem::Container { name, key, pod } => {
-                let attached = app.attached.iter().any(|s| s.as_ref() == key);
-                let state = app
-                    .inventory
-                    .pods
-                    .get(*pod)
-                    .and_then(|p| p.containers.iter().find(|c| &c.name == name));
-                let ok = state.map(|c| c.ready).unwrap_or(false);
-                let indent = app
-                    .inventory
-                    .pods
-                    .get(*pod)
-                    .map(|p| {
-                        if p.owner_kind.is_empty() {
-                            "   "
-                        } else {
-                            "     "
-                        }
-                    })
-                    .unwrap_or("   ");
-                items.push(ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(
-                        if attached { "● " } else { "○ " },
-                        Style::default().fg(if attached {
-                            theme.accent()
-                        } else {
-                            theme.border()
-                        }),
-                    ),
-                    Span::styled(
-                        truncate(name, 18),
-                        Style::default().fg(if ok {
-                            Theme::color(&theme.fg)
-                        } else {
-                            theme.warn()
-                        }),
-                    ),
-                    Span::styled(
-                        format!(" ↺{}", state.map(|c| c.restarts).unwrap_or(0)),
-                        Style::default().fg(Theme::color(&theme.trace)),
-                    ),
-                ])));
-            }
-        }
-    }
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border))
-                .title(title),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(theme.accent())
-                .fg(Theme::color(&theme.match_fg))
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let mut state = ListState::default();
-    if !app.sidebar.is_empty() {
-        state.select(Some(app.sidebar_selected.min(app.sidebar.len() - 1)));
-    }
-    f.render_stateful_widget(list, area, &mut state);
-}
-
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     if app.mode.prompt() != "" {
@@ -403,45 +377,72 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
     let mut spans = vec![Span::styled(format!(" {}", app.status.text), kind_style)];
     spans.push(Span::styled("  │  ", dim));
-    match app.view {
-        View::Logs => {
+
+    match app.right {
+        RightMode::Browse => {
             spans.push(Span::styled(
                 format!(
-                    "{}/{} lines  drop:{}  {}{}",
-                    app.buffer.view_len(),
-                    app.buffer.len(),
-                    app.buffer.dropped,
-                    if app.buffer.filter.is_active() {
-                        format!("filter:{}  ", app.buffer.filter.describe())
-                    } else {
-                        String::new()
-                    },
-                    if app.follow { "FOLLOW" } else { "paused" }
+                    "{}/{} {}",
+                    app.row_view.len(),
+                    app.rows.len(),
+                    app.resource_label()
                 ),
                 dim,
             ));
-            if app.search.regex.is_some() {
+        }
+        RightMode::Detail => match app.view {
+            View::Logs => {
                 spans.push(Span::styled(
-                    format!("  /{}/ {} hits", app.search.query, app.search.total),
-                    Style::default().fg(theme.accent()),
+                    format!(
+                        "{}/{} lines  drop:{}  {}{}",
+                        app.buffer.view_len(),
+                        app.buffer.len(),
+                        app.buffer.dropped,
+                        if app.buffer.filter.is_active() {
+                            format!("filter:{}  ", app.buffer.filter.describe())
+                        } else {
+                            String::new()
+                        },
+                        if app.follow { "FOLLOW" } else { "paused" }
+                    ),
+                    dim,
+                ));
+                if app.search.regex.is_some() {
+                    spans.push(Span::styled(
+                        format!("  /{}/ {} hits", app.search.query, app.search.total),
+                        Style::default().fg(theme.accent()),
+                    ));
+                }
+            }
+            View::Events => {
+                let warnings = app.visible_events().filter(|e| e.is_warning()).count();
+                spans.push(Span::styled(
+                    format!("{} events", app.event_view.len()),
+                    dim,
+                ));
+                if warnings > 0 {
+                    spans.push(Span::styled(
+                        format!("  {warnings} warnings"),
+                        Style::default().fg(theme.error()),
+                    ));
+                }
+            }
+            View::Metrics => {
+                let age = app
+                    .metrics_age()
+                    .map(|d| format!("{}s ago", d.as_secs()))
+                    .unwrap_or_else(|| "waiting".into());
+                spans.push(Span::styled(
+                    format!(
+                        "sort:{}  refresh:{}  samples:{}",
+                        app.sort_by.label(),
+                        age,
+                        app.metrics.history
+                    ),
+                    dim,
                 ));
             }
-        }
-        View::Metrics => {
-            let age = app
-                .metrics_age()
-                .map(|d| format!("{}s ago", d.as_secs()))
-                .unwrap_or_else(|| "waiting".into());
-            spans.push(Span::styled(
-                format!(
-                    "sort:{}  refresh:{}  samples:{}",
-                    app.sort_by.label(),
-                    age,
-                    app.metrics.history
-                ),
-                dim,
-            ));
-        }
+        },
     }
     spans.push(Span::styled("  │  ? help", dim));
     f.render_widget(Paragraph::new(Line::from(spans)), area);

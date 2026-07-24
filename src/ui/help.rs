@@ -11,15 +11,25 @@ use crate::config::Theme;
 
 const BINDINGS: &[(&str, &[(&str, &str)])] = &[
     (
+        "resources",
+        &[
+            (":", "pick a resource type (pods, deploy, svc, crds…)"),
+            ("Tab", "accept the completion / cycle matches"),
+            ("↑ / ↓", "move through the completions"),
+            ("Enter", "open the highlighted object"),
+            ("/", "filter the list by name or namespace"),
+            ("Ctrl-n", "change the namespace scope"),
+            ("Ctrl-r", "re-list now"),
+        ],
+    ),
+    (
         "general",
         &[
-            ("q / Esc / Ctrl-c", "quit"),
+            ("q / Ctrl-c", "quit"),
+            ("Esc", "leave the detail view, then quit"),
             ("?", "toggle this help"),
-            ("1 / 2", "logs view / metrics view"),
-            ("Tab", "move focus between sidebar and content"),
-            ("Shift-Tab", "switch view"),
-            ("Ctrl-n", "change namespace scope"),
-            ("Ctrl-p", "filter the pod list"),
+            ("Tab", "move focus between contexts and resources"),
+            ("Enter", "on a context: switch cluster"),
         ],
     ),
     (
@@ -31,45 +41,36 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl-b / PgUp", "page up"),
             ("g / Home", "jump to the top"),
             ("G / End", "jump to the bottom and follow"),
-            ("h / l / ← / →", "horizontal scroll (nowrap mode)"),
+            ("[ / ]", "horizontal scroll (nowrap mode)"),
         ],
     ),
     (
-        "streams",
-        &[
-            ("Enter", "expand a pod / attach a container"),
-            ("a", "attach every container of the pod"),
-            ("x", "detach all streams"),
-            ("t", "toggle API-server timestamps"),
-            ("p", "toggle previous (crashed) container logs"),
-            ("c", "clear the buffer"),
-            ("s", "save the visible buffer to a file"),
-        ],
-    ),
-    (
-        "search and filter",
+        "detail: 1 logs",
         &[
             ("/", "search (regex, smart case)"),
             ("n / N", "next / previous match"),
             ("\\", "filter lines (prefix ! to exclude)"),
             ("L", "cycle the minimum level"),
             ("e", "errors only"),
-            ("F", "toggle follow"),
-            ("w", "toggle line wrapping"),
+            ("F / w", "follow / line wrapping"),
+            ("t / p", "timestamps / previous container"),
+            ("c / s", "clear buffer / save to file"),
+            ("x", "detach all streams"),
         ],
     ),
     (
-        "metrics",
+        "detail: 2 metrics, 3 events",
         &[
             ("m", "cycle the node, pod and volume tables"),
             ("S", "cycle sort: name / cpu / memory"),
+            ("W", "events: warnings only"),
         ],
     ),
 ];
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
-    let popup = super::centered_rect(70, 80, area);
+    let popup = super::centered_rect(74, 88, area);
     f.render_widget(Clear, popup);
 
     let heading = Style::default()

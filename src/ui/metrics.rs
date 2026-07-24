@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Sparkline, Table, TableState};
 use ratatui::Frame;
 
-use crate::app::{App, MetricPane, Pane, View};
+use crate::app::{App, MetricPane, RightMode, View};
 use crate::config::Theme;
 use crate::metrics::{fmt_bytes, fmt_cpu, pct};
 
@@ -101,7 +101,8 @@ fn draw_cluster(f: &mut Frame, app: &App, area: Rect) {
 
 fn pane_border(app: &App, pane: MetricPane) -> Style {
     let theme = &app.config.theme;
-    let focused = app.pane == Pane::Content && app.view == View::Metrics && app.metric_pane == pane;
+    let focused =
+        app.right == RightMode::Detail && app.view == View::Metrics && app.metric_pane == pane;
     Style::default().fg(if focused {
         theme.border_focus()
     } else {

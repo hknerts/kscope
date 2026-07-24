@@ -5,8 +5,10 @@
 //! so it is safe to run against production with a view-only ServiceAccount.
 
 pub mod discovery;
+pub mod events;
 pub mod logs;
 pub mod metrics;
+pub mod resources;
 
 use anyhow::{Context, Result};
 use kube::config::{KubeConfigOptions, Kubeconfig};
