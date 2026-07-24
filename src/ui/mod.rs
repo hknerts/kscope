@@ -21,20 +21,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(6),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
         .split(area);
 
     draw_header(f, app, chunks[0]);
-    draw_hints(f, app, chunks[1]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(34), Constraint::Min(20)])
-        .split(chunks[2]);
+        .split(chunks[1]);
 
     draw_sidebar(f, app, body[0]);
     match app.view {
@@ -42,19 +40,58 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Metrics => metrics::draw(f, app, body[1]),
     }
 
-    draw_status(f, app, chunks[3]);
+    draw_status(f, app, chunks[2]);
 
     if app.mode == InputMode::Help {
         help::draw(f, app, area);
     }
 }
 
+/// The kscope wordmark as a small binoculars glyph — five rows so it has
+/// room to breathe next to the identity block and the shortcut strip.
+const ICON: [&str; 5] = [
+    "  ___     ___  ",
+    " /   \\===/   \\ ",
+    "|  o  | |  o  |",
+    " \\___/   \\___/ ",
+    "    kscope     ",
+];
+const ICON_WIDTH: u16 = 17;
+
+/// Header: a five-row "pro" bar — identity (context/version/user) on the
+/// left, the context-sensitive keybinding cheat sheet in the middle, and the
+/// kscope binoculars glyph on the right.
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.config.theme;
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(theme.border()));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(44),
+            Constraint::Length(2),
+            Constraint::Min(20),
+            Constraint::Length(2),
+            Constraint::Length(ICON_WIDTH),
+        ])
+        .split(inner);
+
+    draw_identity(f, app, cols[0]);
+    draw_shortcuts(f, app, cols[2]);
+    draw_icon(f, app, cols[4]);
+}
+
+fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     let accent = Style::default()
         .fg(theme.accent())
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Theme::color(&theme.trace));
+    let fg = Style::default().fg(Theme::color(&theme.fg));
 
     let tab = |label: &'static str, active: bool| {
         if active {
@@ -71,33 +108,71 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let (cpu_used, cpu_cap, mem_used, mem_cap) = app.metrics.cluster_totals();
-    let line = Line::from(vec![
-        Span::styled(" kscope ", accent),
-        tab("1:logs", app.view == View::Logs),
-        tab("2:metrics", app.view == View::Metrics),
-        Span::raw("  "),
-        Span::styled("ns:", dim),
-        Span::raw(app.scope.label().to_string()),
-        Span::raw("  "),
-        Span::styled("pods:", dim),
-        Span::raw(app.inventory.pods.len().to_string()),
-        Span::raw("  "),
-        Span::styled("nodes:", dim),
-        Span::raw(app.inventory.nodes.len().to_string()),
-        Span::raw("  "),
-        Span::styled("cluster:", dim),
-        Span::raw(format!(
-            "cpu {:.0}% mem {:.0}%",
-            crate::metrics::pct(cpu_used, cpu_cap),
-            crate::metrics::pct(mem_used, mem_cap)
-        )),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    let field = |label: &'static str, value: &str| {
+        let value = if value.is_empty() { "-" } else { value }.to_string();
+        Line::from(vec![
+            Span::styled(format!(" {label:<8}", label = label), dim),
+            Span::styled(value, fg),
+        ])
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(" kscope ", accent),
+            tab("1:logs", app.view == View::Logs),
+            tab("2:metrics", app.view == View::Metrics),
+        ]),
+        field("context", &app.context_name),
+        field("k8s", &app.k8s_version),
+        field("user", &app.user_name),
+        Line::from(vec![
+            Span::styled(" ns:", dim),
+            Span::styled(truncate(app.scope.label(), 10), fg),
+            Span::styled("  pods:", dim),
+            Span::styled(app.inventory.pods.len().to_string(), fg),
+            Span::styled("  nodes:", dim),
+            Span::styled(app.inventory.nodes.len().to_string(), fg),
+            Span::styled("  cpu:", dim),
+            Span::styled(
+                format!("{:.0}%", crate::metrics::pct(cpu_used, cpu_cap)),
+                fg,
+            ),
+            Span::styled(" mem:", dim),
+            Span::styled(
+                format!("{:.0}%", crate::metrics::pct(mem_used, mem_cap)),
+                fg,
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
-/// A persistent, context-sensitive keybinding strip under the header —
-/// the "always visible" cheat sheet `?` otherwise hides behind an overlay.
-fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
+fn draw_icon(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.config.theme;
+    let accent = Style::default().fg(theme.accent());
+    let dim = Style::default().fg(Theme::color(&theme.trace));
+    let lines: Vec<Line> = ICON
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            Line::from(Span::styled(
+                *row,
+                if i == ICON.len() - 1 {
+                    dim.add_modifier(Modifier::BOLD)
+                } else {
+                    accent
+                },
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// A persistent, context-sensitive keybinding grid in the header — the
+/// "always visible" cheat sheet `?` otherwise hides behind an overlay.
+/// Bindings are laid out in columns of `area.height` rows so they use the
+/// full height of the header instead of running off one long line.
+fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     let key = Style::default()
         .fg(theme.accent())
@@ -124,7 +199,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             }
             View::Metrics => {
                 bindings.push(("j/k", "move"));
-                bindings.push(("m", "nodes/pods/volumes"));
+                bindings.push(("m", "cycle tables"));
                 bindings.push(("S", "sort"));
             }
         }
@@ -132,15 +207,37 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
     bindings.push(("?", "help"));
     bindings.push(("q", "quit"));
 
-    let mut spans = Vec::with_capacity(bindings.len() * 3);
-    for (i, (k, desc)) in bindings.iter().enumerate() {
+    // Each column is "KEY    description" (7 + up to 14 chars) plus a 2-cell
+    // gutter, so adjacent columns never visually run into each other even
+    // when a description fills the whole column width.
+    const COL_WIDTH: u16 = 21;
+    const GUTTER: u16 = 2;
+    let rows = (area.height as usize).max(1);
+    let col_count = bindings.len().div_ceil(rows);
+    let mut constraints = Vec::with_capacity(col_count * 2);
+    for i in 0..col_count {
         if i > 0 {
-            spans.push(Span::styled("  ", label));
+            constraints.push(Constraint::Length(GUTTER));
         }
-        spans.push(Span::styled(*k, key));
-        spans.push(Span::styled(format!(" {desc}"), label));
+        constraints.push(Constraint::Length(COL_WIDTH));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    for (col_area, chunk) in cols.iter().step_by(2).zip(bindings.chunks(rows)) {
+        let lines: Vec<Line> = chunk
+            .iter()
+            .map(|(k, desc)| {
+                Line::from(vec![
+                    Span::styled(format!("{k:<7}"), key),
+                    Span::styled(*desc, label),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), *col_area);
+    }
 }
 
 fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
