@@ -8,16 +8,7 @@ replacement for `k9s` — there is no editing, scaling, deleting or shelling in.
 That is the point: kscope is safe to hand to anyone with a view-only token, and
 it stays fast because it never has to be anything else.
 
-```
-┌ kscope  1:logs  2:metrics   ns:prod  pods:184  nodes:12  cluster:cpu 61% mem 74% ┐
-│ pods ─────────────┐ levels: FATAL 0  ERROR 42  WARN 118  INFO 9k  DEBUG 2k       │
-│ ▾ checkout-7d9c   │┌ logs · prod/checkout-7d9c:app · follow · nowrap ───────────┐│
-│    ● app     ↺0   ││ 10:22:31.004 INFO  order 8812 accepted in 41ms             ││
-│    ○ envoy   ↺2   ││ 10:22:31.219 WARN  retrying payments upstream (attempt 2)  ││
-│ ▸ payments-5f2a   ││ 10:22:31.402 ERROR connect 10.4.2.11:8443 deadline exceeded││
-└───────────────────┘└────────────────────────────────────────────────────────────┘
- streaming prod/checkout-7d9c:app │ 11482/50000 lines  filter:>=WARN  FOLLOW │ ? help
-```
+![kscope](assets/banner.png)
 
 ## Why
 
