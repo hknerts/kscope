@@ -21,8 +21,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
-            Constraint::Percentage(35),
-            Constraint::Min(6),
+            Constraint::Percentage(28),
+            Constraint::Percentage(28),
+            Constraint::Min(7),
             Constraint::Length(10),
         ])
         .split(area);
@@ -30,7 +31,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     draw_cluster(f, app, chunks[0]);
     draw_nodes(f, app, chunks[1]);
     draw_pods(f, app, chunks[2]);
-    draw_containers(f, app, chunks[3]);
+    draw_volumes(f, app, chunks[3]);
+    draw_containers(f, app, chunks[4]);
 }
 
 fn severity(app: &App, percent: f64) -> Style {
@@ -252,6 +254,76 @@ fn draw_pods(f: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     if !pods.is_empty() {
         state.select(Some(app.pod_metric_selected.min(pods.len() - 1)));
+    }
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+/// PersistentVolumeClaims: capacity and status only. kscope reads these
+/// straight from the Kubernetes API, not kubelet's stats/summary, so there is
+/// no live "bytes actually used" figure — see `VolumeInfo`.
+fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
+    let theme = &app.config.theme;
+    let dim = Style::default().fg(Theme::color(&theme.trace));
+
+    let volumes = &app.inventory.volumes;
+    let rows: Vec<Row> = volumes
+        .iter()
+        .map(|v| {
+            let phase_style = match v.phase.as_str() {
+                "Bound" => Style::default().fg(Theme::color(&theme.info)),
+                "Pending" => Style::default().fg(theme.warn()),
+                _ => Style::default().fg(theme.error()),
+            };
+            let used_by = if v.used_by.is_empty() {
+                "-".to_string()
+            } else {
+                v.used_by.join(",")
+            };
+            Row::new(vec![
+                Cell::from(super::truncate(&v.namespace, 12)).style(dim),
+                Cell::from(super::truncate(&v.name, 24)),
+                Cell::from(v.phase.clone()).style(phase_style),
+                Cell::from(fmt_bytes(v.capacity_bytes.max(v.requested_bytes))),
+                Cell::from(super::truncate(&v.storage_class, 14)).style(dim),
+                Cell::from(super::truncate(&v.access_modes, 10)).style(dim),
+                Cell::from(super::truncate(&used_by, 26)).style(dim),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Length(24),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Min(20),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            "NAMESPACE", "PVC", "STATUS", "SIZE", "CLASS", "ACCESS", "USED BY",
+        ])
+        .style(dim),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(pane_border(app, MetricPane::Volumes))
+            .title(format!(" volumes ({}) ", volumes.len())),
+    )
+    .highlight_style(
+        Style::default()
+            .bg(theme.accent())
+            .fg(Theme::color(&theme.match_fg)),
+    );
+
+    let mut state = TableState::default();
+    if !volumes.is_empty() {
+        state.select(Some(app.volume_selected.min(volumes.len() - 1)));
     }
     f.render_stateful_widget(table, area, &mut state);
 }

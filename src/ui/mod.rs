@@ -22,17 +22,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
         ])
         .split(area);
 
     draw_header(f, app, chunks[0]);
+    draw_hints(f, app, chunks[1]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(34), Constraint::Min(20)])
-        .split(chunks[1]);
+        .split(chunks[2]);
 
     draw_sidebar(f, app, body[0]);
     match app.view {
@@ -40,7 +42,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Metrics => metrics::draw(f, app, body[1]),
     }
 
-    draw_status(f, app, chunks[2]);
+    draw_status(f, app, chunks[3]);
 
     if app.mode == InputMode::Help {
         help::draw(f, app, area);
@@ -93,6 +95,54 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// A persistent, context-sensitive keybinding strip under the header —
+/// the "always visible" cheat sheet `?` otherwise hides behind an overlay.
+fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
+    let theme = &app.config.theme;
+    let key = Style::default()
+        .fg(theme.accent())
+        .add_modifier(Modifier::BOLD);
+    let label = Style::default().fg(Theme::color(&theme.trace));
+
+    let mut bindings: Vec<(&str, &str)> = vec![("Tab", "pane"), ("1/2", "view")];
+    if app.pane == Pane::Sidebar {
+        bindings.push(("j/k", "move"));
+        bindings.push(("Enter", "open/expand"));
+        bindings.push(("a/x", "attach/detach"));
+        bindings.push(("Ctrl-n", "namespace"));
+        bindings.push(("Ctrl-p", "filter pods"));
+    } else {
+        match app.view {
+            View::Logs => {
+                bindings.push(("j/k", "scroll"));
+                bindings.push(("/", "search"));
+                bindings.push(("\\", "filter"));
+                bindings.push(("L/e", "level/errors"));
+                bindings.push(("F/w", "follow/wrap"));
+                bindings.push(("t/p", "time/prev"));
+                bindings.push(("c/s", "clear/save"));
+            }
+            View::Metrics => {
+                bindings.push(("j/k", "move"));
+                bindings.push(("m", "nodes/pods/volumes"));
+                bindings.push(("S", "sort"));
+            }
+        }
+    }
+    bindings.push(("?", "help"));
+    bindings.push(("q", "quit"));
+
+    let mut spans = Vec::with_capacity(bindings.len() * 3);
+    for (i, (k, desc)) in bindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", label));
+        }
+        spans.push(Span::styled(*k, key));
+        spans.push(Span::styled(format!(" {desc}"), label));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.config.theme;
     let focused = app.pane == Pane::Sidebar;
@@ -110,6 +160,26 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mut items: Vec<ListItem> = Vec::with_capacity(app.sidebar.len());
     for item in &app.sidebar {
         match item {
+            SidebarItem::Group { key, kind, name } => {
+                let marker = if app.collapsed_groups.contains(key) {
+                    "▸"
+                } else {
+                    "▾"
+                };
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{marker} "), Style::default().fg(theme.border())),
+                    Span::styled(
+                        truncate(name, 22),
+                        Style::default()
+                            .fg(theme.accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {kind}"),
+                        Style::default().fg(Theme::color(&theme.trace)),
+                    ),
+                ])));
+            }
             SidebarItem::Pod { pod, key } => {
                 let Some(info) = app.inventory.pods.get(*pod) else {
                     continue;
@@ -121,7 +191,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     theme.error()
                 };
+                let indent = if info.owner_kind.is_empty() { "" } else { "  " };
                 items.push(ListItem::new(Line::from(vec![
+                    Span::raw(indent),
                     Span::styled(format!("{marker} "), Style::default().fg(theme.border())),
                     Span::styled(truncate(&info.name, 20), Style::default().fg(color)),
                     Span::styled(
@@ -142,8 +214,14 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     .get(*pod)
                     .and_then(|p| p.containers.iter().find(|c| &c.name == name));
                 let ok = state.map(|c| c.ready).unwrap_or(false);
+                let indent = app
+                    .inventory
+                    .pods
+                    .get(*pod)
+                    .map(|p| if p.owner_kind.is_empty() { "   " } else { "     " })
+                    .unwrap_or("   ");
                 items.push(ListItem::new(Line::from(vec![
-                    Span::raw("   "),
+                    Span::raw(indent),
                     Span::styled(
                         if attached { "● " } else { "○ " },
                         Style::default().fg(if attached {
