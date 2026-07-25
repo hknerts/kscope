@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod node_logs;
 pub mod resources;
 pub mod selection;
+pub mod volume_stats;
 
 use anyhow::{Context, Result};
 use kube::config::{KubeConfigOptions, Kubeconfig};

@@ -172,6 +172,26 @@ pub async fn list(
     Ok(rows)
 }
 
+/// Fetch one object in full, for the describe tab.
+///
+/// Listings drop everything but the few columns a table needs, so describing
+/// re-fetches — one request when the tab is opened, rather than carrying every
+/// object's whole spec in memory.
+pub async fn get(
+    client: &kube::Client,
+    kind: &ResourceType,
+    namespace: &str,
+    name: &str,
+) -> Result<serde_json::Value> {
+    let api: Api<DynamicObject> = if kind.namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client.clone(), namespace, &kind.api)
+    } else {
+        Api::all_with(client.clone(), &kind.api)
+    };
+    let object = api.get(name).await?;
+    Ok(serde_json::to_value(&object)?)
+}
+
 fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
     let age_seconds = obj
         .metadata

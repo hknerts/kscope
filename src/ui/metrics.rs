@@ -279,14 +279,23 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 v.used_by.join(",")
             };
+            // Actual usage only exists when a kubelet has the volume mounted;
+            // an unbound or unmounted claim legitimately has none.
+            let (used, used_style) = match app.usage_for(&v.namespace, &v.name) {
+                Some(u) => (
+                    format!("{} {:>3.0}%", fmt_bytes(u.used_bytes), u.used_pct()),
+                    severity(app, u.used_pct()),
+                ),
+                None => ("-".to_string(), dim),
+            };
             Row::new(vec![
                 Cell::from(super::truncate(&v.namespace, 12)).style(dim),
                 Cell::from(super::truncate(&v.name, 24)),
                 Cell::from(v.phase.clone()).style(phase_style),
+                Cell::from(used).style(used_style),
                 Cell::from(fmt_bytes(v.capacity_bytes.max(v.requested_bytes))),
                 Cell::from(super::truncate(&v.storage_class, 14)).style(dim),
-                Cell::from(super::truncate(&v.access_modes, 10)).style(dim),
-                Cell::from(super::truncate(&used_by, 26)).style(dim),
+                Cell::from(super::truncate(&used_by, 22)).style(dim),
             ])
         })
         .collect();
@@ -297,10 +306,10 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(12),
             Constraint::Length(24),
             Constraint::Length(8),
-            Constraint::Length(10),
             Constraint::Length(14),
             Constraint::Length(10),
-            Constraint::Min(20),
+            Constraint::Length(14),
+            Constraint::Min(18),
         ],
     )
     .header(
@@ -308,9 +317,9 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
             "NAMESPACE",
             "PVC",
             "STATUS",
+            "USED",
             "SIZE",
             "CLASS",
-            "ACCESS",
             "USED BY",
         ])
         .style(dim),
@@ -319,7 +328,22 @@ fn draw_volumes(f: &mut Frame, app: &mut App, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(pane_border(app, MetricPane::Volumes))
-            .title(format!(" volumes ({}) ", volumes.len())),
+            // A column of dashes needs a reason. There are two, and they are
+            // different problems: no permission to ask, versus a storage
+            // driver that does not report (hostPath and local-path volumes
+            // never do, which is every kind/minikube cluster).
+            .title(
+                match (&app.volume_usage_error, app.volume_usage.is_empty()) {
+                    (Some(_), _) => {
+                        format!(" volumes ({}) · usage needs nodes/proxy ", volumes.len())
+                    }
+                    (None, true) if !volumes.is_empty() && app.volume_usage_polled() => format!(
+                        " volumes ({}) · usage not reported by this storage driver ",
+                        volumes.len()
+                    ),
+                    _ => format!(" volumes ({}) ", volumes.len()),
+                },
+            ),
     )
     .row_highlight_style(
         Style::default()

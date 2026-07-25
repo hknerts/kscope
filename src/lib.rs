@@ -13,6 +13,7 @@
 
 pub mod app;
 pub mod config;
+pub mod describe;
 pub mod event;
 pub mod k8s;
 pub mod logs;

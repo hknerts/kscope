@@ -6,6 +6,7 @@
 //! browser or, once something is opened, its logs / metrics / events.
 
 mod contexts;
+mod describe;
 mod events;
 mod help;
 mod logs;
@@ -95,6 +96,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         tab("1:logs", app.view == View::Logs),
         tab("2:metrics", app.view == View::Metrics),
         tab("3:events", app.view == View::Events),
+        tab("4:describe", app.view == View::Describe),
     ];
     spans.push(Span::styled("   Esc: back", dim));
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
@@ -103,6 +105,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         View::Logs => logs::draw(f, app, rows[1]),
         View::Metrics => metrics::draw(f, app, rows[1]),
         View::Events => events::draw(f, app, rows[1]),
+        View::Describe => describe::draw(f, app, rows[1]),
     }
 }
 
@@ -304,7 +307,7 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
             bindings.push(("Ctrl-r", "refresh"));
         }
         (Pane::Resources, RightMode::Detail) => {
-            bindings.push(("1/2/3", "logs/metrics/events"));
+            bindings.push(("1-4", "logs/metrics/events/describe"));
             bindings.push(("Esc", "back to list"));
             match app.view {
                 View::Logs => {
@@ -322,6 +325,10 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
                 }
                 View::Events => {
                     bindings.push(("W", "warnings only"));
+                }
+                View::Describe => {
+                    bindings.push(("j/k", "scroll"));
+                    bindings.push(("g/G", "top/bottom"));
                 }
             }
         }
@@ -439,6 +446,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(theme.error()),
                     ));
                 }
+            }
+            View::Describe => {
+                spans.push(Span::styled(
+                    format!("{} lines of yaml", app.describe_len()),
+                    dim,
+                ));
             }
             View::Metrics => {
                 let age = app
