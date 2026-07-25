@@ -51,6 +51,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             " press : to pick a resource type".to_string()
         } else if app.rows.is_empty() {
             format!(" no {} in {}", app.resource_label(), app.scope.label())
+        } else if app.problems_only {
+            format!(
+                " no {} in trouble — press ! to show all",
+                app.resource_label()
+            )
         } else {
             " nothing matches the filter".to_string()
         };

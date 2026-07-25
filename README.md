@@ -38,7 +38,9 @@ Two panes, and one key that drives everything:
   place — the client is rebuilt and every poller restarts, without restarting
   kscope.
 * **`Enter` opens an object** into three tabs: its logs, its metrics, its
-  events. `Esc` goes back to the list.
+  events. `Esc` goes back to the list. Logs follow whatever you opened — a
+  Deployment streams all its replicas, a Service streams what it selects, a Node
+  shows its kubelet journal.
 
 ## Why
 
@@ -48,12 +50,18 @@ being OOM-throttled — and then you still have to run `kubectl describe` in
 another terminal to find out why it will not start. kscope keeps all of it on
 one screen:
 
-* **Logs** — paging, regex search with match highlighting, level filtering,
-  automatic error highlighting, multi-container streaming, export to file.
+* **Logs** — open a *workload*, not a pod: every replica of a Deployment merges
+  into one timeline, and a rollout hands the stream over to the new pods instead
+  of going quiet on the old ones. Plus paging, regex search with match
+  highlighting, level filtering, automatic error highlighting, export to file.
 * **Metrics** — live CPU and memory at **node**, **pod** *and* **container**
   granularity, with usage-versus-limit percentages and rolling sparklines.
 * **Events** — scoped to the object you have open, warnings separable with one
   key, so "why is this pending?" is one `3` away.
+* **Triage** — `!` narrows any listing to just the objects in trouble, reading
+  the real container state rather than the phase: a pod stuck in
+  `CrashLoopBackOff` still reports phase `Running`, and that is exactly the one
+  you need to find.
 
 ## kscope or k9s?
 
@@ -107,6 +115,7 @@ kscope                        # current context, current namespace
 kscope -n payments            # a specific namespace
 kscope -A                     # every namespace you can read
 kscope --context staging      # start on a specific kubeconfig context
+kscope -l app=api,tier!=batch # only objects matching a label selector
 kscope --tail 2000            # only the last 2000 log lines instead of everything
 kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
 kscope --since 3600           # only lines from the last hour
@@ -148,6 +157,8 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `Enter` | open the object (logs / metrics / events) |
 | `1` `2` `3` | open it straight onto logs / metrics / events |
 | `/` | filter the list by name or namespace |
+| `!` | show only the objects in trouble |
+| `l` | set a label selector |
 | `Ctrl-r` | re-list now |
 
 ### Contexts pane
@@ -168,6 +179,7 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `c` / `s` | clear buffer / save visible buffer to a file |
 | `[` `]` | horizontal scroll when wrapping is off |
 | `x` | detach all streams |
+| `v` | on a Node: cycle kubelet / containerd / kernel |
 
 ### Detail — `2` metrics, `3` events
 
@@ -176,9 +188,11 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `m` / `S` | switch metric table / cycle sort order |
 | `W` | events: warnings only |
 
-> Logs are only served for pods — the Kubernetes API has no log endpoint for a
-> Deployment. On any other kind the logs tab says so; press `:po` to get back to
-> pods.
+> The logs tab resolves whatever you opened down to pods: a Deployment,
+> StatefulSet, DaemonSet, Job or ReplicaSet through its replicas, a Service or
+> CRD through its `spec.selector`, a Namespace or Node through everything running
+> there. Kinds with nothing behind them (a ConfigMap, say) say so. `logs.max_streams`
+> caps how many containers are streamed at once — see [Configuration](#configuration).
 
 ## How far back can I scroll?
 
@@ -230,6 +244,7 @@ max_fps = 30
 buffer_lines = 0     # 0 = unlimited (default): never evict
 tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
+max_streams = 50     # cap on concurrent container log streams
 
 [metrics]
 refresh_ms = 5000
@@ -273,6 +288,19 @@ For the full experience — every kind the palette can offer, CRDs included — 
 the built-in `view` ClusterRole instead. Everything degrades gracefully: a kind
 you cannot list reports the error in the pane it belongs to and leaves the rest
 of the tool working.
+
+Node journals (`v` on an open Node) are the one thing `view` does not cover, and
+they are worth granting deliberately rather than by default:
+
+```yaml
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+```
+
+They also need Kubernetes 1.27+ with the `NodeLogQuery` feature gate and
+kubelet's `enableSystemLogHandler` and `enableSystemLogQuery` both enabled.
+Without them kscope says which of the two is missing rather than failing blankly.
 
 ## Performance notes
 

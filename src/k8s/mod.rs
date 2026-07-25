@@ -8,7 +8,9 @@ pub mod discovery;
 pub mod events;
 pub mod logs;
 pub mod metrics;
+pub mod node_logs;
 pub mod resources;
+pub mod selection;
 
 use anyhow::{Context, Result};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -95,6 +97,9 @@ pub struct PodInfo {
     pub owner_kind: String,
     /// Owning workload name. Empty for standalone pods.
     pub owner_name: String,
+    /// Pod labels, so a Service's selector (and `--selector`) can be matched
+    /// against them without a second API call.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 impl PodInfo {

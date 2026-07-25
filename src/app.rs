@@ -24,6 +24,7 @@ use crate::k8s::events::{EventInfo, EventUpdate};
 use crate::k8s::logs::{LogEvent, StreamSpec};
 use crate::k8s::metrics::MetricsEvent;
 use crate::k8s::resources::{ResourceRow, ResourceType};
+use crate::k8s::selection::{LabelSelector, LogTarget};
 use crate::k8s::{Inventory, PodInfo};
 use crate::logs::{Highlighter, Level, LogBuffer, LogLine};
 use crate::metrics::MetricsStore;
@@ -64,6 +65,8 @@ pub enum InputMode {
     RowFilter,
     /// The `:` resource-type palette.
     Command,
+    /// `-l` label selector entry.
+    Selector,
     Help,
 }
 
@@ -75,6 +78,7 @@ impl InputMode {
             InputMode::Namespace => "namespace > ",
             InputMode::RowFilter => "matching > ",
             InputMode::Command => ":",
+            InputMode::Selector => "selector (k=v,k2!=v2) > ",
             _ => "",
         }
     }
@@ -185,6 +189,13 @@ pub struct App {
     pub row_view: Vec<usize>,
     pub row_selected: usize,
     pub row_filter: Option<String>,
+    /// `-l`/`--selector`: narrows both the browsed list and the pods a
+    /// workload's logs are collected from.
+    pub selector: LabelSelector,
+    /// Raw selector text, for the header and for re-editing.
+    pub selector_text: String,
+    /// Show only rows whose status reads as a problem — the triage filter.
+    pub problems_only: bool,
     pub rows_error: Option<String>,
     /// Set while a list request is in flight, so the pane can say so.
     pub loading: bool,
@@ -223,6 +234,14 @@ pub struct App {
     pub pod_metric_selected: usize,
     pub volume_selected: usize,
     pub sort_by: SortBy,
+
+    /// Which node service the logs tab is showing when a Node is open.
+    pub node_service: usize,
+    /// Set while a node log request is in flight.
+    pub node_logs_loading: bool,
+    /// Node whose logs were last requested, so the fetch is not repeated on
+    /// every inventory tick.
+    node_logs_for: Option<String>,
 
     pub attached: Vec<Arc<str>>,
     /// Key of the object the current streams belong to, so switching rows
@@ -277,6 +296,9 @@ impl App {
             row_view: Vec::new(),
             row_selected: 0,
             row_filter: None,
+            selector: LabelSelector::default(),
+            selector_text: String::new(),
+            problems_only: false,
             rows_error: None,
             loading: false,
             right: RightMode::Browse,
@@ -303,6 +325,9 @@ impl App {
             pod_metric_selected: 0,
             volume_selected: 0,
             sort_by: SortBy::Cpu,
+            node_service: 0,
+            node_logs_loading: false,
+            node_logs_for: None,
             attached: Vec::new(),
             attached_to: None,
             streams: HashMap::new(),
@@ -377,6 +402,7 @@ impl App {
             .rows
             .iter()
             .enumerate()
+            .filter(|(_, r)| !self.problems_only || r.unhealthy)
             .filter(|(_, r)| match &needle {
                 None => true,
                 Some(n) => {
@@ -635,47 +661,159 @@ impl App {
     /// Called every time the logs tab becomes visible or the selection moves,
     /// so the buffer always belongs to exactly one object. A no-op when the
     /// streams already point at the right pod.
-    pub fn sync_logs(&mut self) {
-        if self.right != RightMode::Detail || self.view != View::Logs {
-            return;
-        }
-        let wanted = self.selected_row().map(|r| r.key());
-        if wanted.is_some() && wanted == self.attached_to {
+    /// The node service the logs tab is showing (`kubelet`, `containerd`, …).
+    pub fn node_service(&self) -> &'static str {
+        crate::k8s::node_logs::COMMON_SERVICES
+            [self.node_service % crate::k8s::node_logs::COMMON_SERVICES.len()]
+    }
+
+    /// Ask for a node's journal, unless it is already on screen. Unlike pod
+    /// logs this is a one-shot fetch, not a stream: the kubelet endpoint has
+    /// no follow mode.
+    fn sync_node_logs(&mut self, node: &str) {
+        let key = format!("node/{node}/{}", self.node_service());
+        if self.node_logs_for.as_deref() == Some(key.as_str()) {
             return;
         }
         self.detach_all();
         self.buffer.clear();
         self.scroll = 0;
         self.search.current = None;
-        self.attach_selected();
+        self.attached_to = None;
+        self.node_logs_for = Some(key);
+        self.node_logs_loading = true;
+        self.dirty = true;
     }
 
-    /// Attach to every container of the selected pod.
-    pub fn attach_selected(&mut self) {
-        let Some(pod) = self.selected_pod().cloned() else {
-            let hint = match self.current_type() {
-                Some(t) if t.api.kind != "Pod" => {
-                    format!(
-                        "logs are only available for pods — press :pods (this is {})",
-                        t.name()
-                    )
+    /// The pending node log request, taken by the main loop.
+    pub fn take_node_log_request(&mut self) -> Option<(String, &'static str)> {
+        if !self.node_logs_loading {
+            return None;
+        }
+        self.node_logs_loading = false;
+        let target = self.log_target()?;
+        if !target.kind.eq_ignore_ascii_case("node") {
+            return None;
+        }
+        Some((target.name, self.node_service()))
+    }
+
+    /// Deliver fetched node logs into the buffer.
+    pub fn on_node_logs(&mut self, node: String, service: &str, result: Result<String, String>) {
+        match result {
+            Ok(text) => {
+                let source: Arc<str> = Arc::from(format!("{node}:{service}"));
+                for line in text.lines() {
+                    self.buffer
+                        .push(LogLine::new(line.to_string(), source.clone()));
                 }
-                _ => "waiting for the pod inventory…".to_string(),
-            };
-            self.set_status(hint, StatusKind::Warn);
+                self.attached = vec![source];
+                self.scroll_to_bottom();
+                self.refresh_search_count();
+                self.set_status(
+                    format!("{service} logs from {node} ({} lines)", self.buffer.len()),
+                    StatusKind::Info,
+                );
+            }
+            Err(err) => {
+                // Leave the reason on screen: it names the feature gate or the
+                // missing RBAC verb, which is the whole diagnosis.
+                self.node_logs_for = None;
+                self.set_status(err, StatusKind::Error);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The object the logs tab is about, as a selection target.
+    pub fn log_target(&self) -> Option<LogTarget> {
+        let kind = self.current_type()?.api.kind.clone();
+        let row = self.selected_row()?;
+        Some(LogTarget {
+            kind,
+            namespace: row.namespace.clone(),
+            name: row.name.clone(),
+            selector: row.selector.clone(),
+        })
+    }
+
+    /// Make the log streams match what the logs tab is showing — including as
+    /// the cluster changes underneath it.
+    ///
+    /// This is what lets kscope follow a workload rather than a pod: opening a
+    /// Deployment merges every replica into one buffer, and because the
+    /// inventory poller calls this on every refresh, a rollout hands the stream
+    /// over to the new pods instead of going silent on the old ones.
+    pub fn sync_logs(&mut self) {
+        if self.right != RightMode::Detail || self.view != View::Logs {
+            return;
+        }
+        let Some(target) = self.log_target() else {
             return;
         };
-        self.attached_to = self.selected_row().map(|r| r.key());
-        for container in pod.containers.iter().filter(|c| !c.init) {
-            let spec = StreamSpec {
-                namespace: pod.namespace.clone(),
-                pod: pod.name.clone(),
-                container: Some(container.name.clone()),
-                tail: self.tail_lines(),
-                since_seconds: self.config.logs.since_seconds,
-                timestamps: self.timestamps,
-                previous: self.previous,
-            };
+
+        // A Node has no pods of its own worth merging — it has a journal.
+        if target.kind.eq_ignore_ascii_case("node") {
+            self.sync_node_logs(&target.name);
+            return;
+        }
+
+        let key = format!("{}/{}/{}", target.kind, target.namespace, target.name);
+
+        // A different object means a different buffer.
+        if self.attached_to.as_deref() != Some(key.as_str()) {
+            self.detach_all();
+            self.buffer.clear();
+            self.scroll = 0;
+            self.search.current = None;
+            self.attached_to = Some(key);
+        }
+
+        let mut wanted: Vec<StreamSpec> = Vec::new();
+        for pod in crate::k8s::selection::pods_for(&target, &self.inventory.pods, &self.selector) {
+            for container in pod.containers.iter().filter(|c| !c.init) {
+                wanted.push(StreamSpec {
+                    namespace: pod.namespace.clone(),
+                    pod: pod.name.clone(),
+                    container: Some(container.name.clone()),
+                    tail: self.tail_lines(),
+                    since_seconds: self.config.logs.since_seconds,
+                    timestamps: self.timestamps,
+                    previous: self.previous,
+                });
+            }
+        }
+
+        // Cap concurrent streams: a DaemonSet on a 500-node cluster would
+        // otherwise open 500 watches against the API server at once.
+        let cap = self.config.logs.max_streams.max(1);
+        let total = wanted.len();
+        let truncated = total > cap;
+        if truncated {
+            wanted.truncate(cap);
+        }
+
+        // Drop streams whose pod is gone, keep the ones still wanted, open the
+        // rest. Keeping them matters: re-attaching would replay the whole
+        // history into the buffer on every inventory tick.
+        let keep: HashSet<Arc<str>> = wanted.iter().map(|s| s.source()).collect();
+        let stale: Vec<Arc<str>> = self
+            .streams
+            .keys()
+            .filter(|s| !keep.contains(*s))
+            .cloned()
+            .collect();
+        let dropped = stale.len();
+        for source in stale {
+            if let Some(handle) = self.streams.remove(&source) {
+                handle.abort();
+            }
+            self.attached.retain(|s| *s != source);
+        }
+
+        let had = self.attached.len();
+        let mut opened = 0usize;
+        for spec in wanted {
             let source = spec.source();
             if self.streams.contains_key(&source) {
                 continue;
@@ -683,6 +821,30 @@ impl App {
             let handle = crate::k8s::logs::spawn(self.client.clone(), spec, self.log_tx.clone());
             self.streams.insert(source.clone(), handle);
             self.attached.push(source);
+            opened += 1;
+        }
+
+        if truncated {
+            self.set_status(
+                format!("streaming {cap} of {total} containers — raise logs.max_streams for more"),
+                StatusKind::Warn,
+            );
+        } else if had > 0 && (opened > 0 || dropped > 0) {
+            // Only worth saying when this was a hand-over rather than the
+            // first attach, i.e. a rollout replacing pods under a live stream.
+            self.set_status(
+                format!("membership changed: +{opened} -{dropped} containers"),
+                StatusKind::Info,
+            );
+        } else if self.attached.is_empty() {
+            let hint = match self.current_type() {
+                Some(t) if !self.selector.is_empty() => {
+                    format!("no {} pods match the selector", t.name())
+                }
+                Some(t) => format!("no pods behind this {}", t.api.kind.to_ascii_lowercase()),
+                None => "waiting for the pod inventory…".to_string(),
+            };
+            self.set_status(hint, StatusKind::Warn);
         }
         self.dirty = true;
     }
@@ -941,7 +1103,11 @@ impl App {
         }
         if matches!(
             self.mode,
-            InputMode::Search | InputMode::Filter | InputMode::Namespace | InputMode::RowFilter
+            InputMode::Search
+                | InputMode::Filter
+                | InputMode::Namespace
+                | InputMode::RowFilter
+                | InputMode::Selector
         ) {
             self.on_prompt_key(key);
             return;
@@ -1088,6 +1254,43 @@ impl App {
             }
             KeyCode::Char('s') => self.save_buffer(),
 
+            // Triage: narrow any listing to just the objects in trouble.
+            KeyCode::Char('!') => {
+                self.problems_only = !self.problems_only;
+                self.rebuild_row_view();
+                self.set_status(
+                    if self.problems_only {
+                        format!(
+                            "problems only — {} of {}",
+                            self.row_view.len(),
+                            self.rows.len()
+                        )
+                    } else {
+                        format!("all {} {}", self.rows.len(), self.resource_label())
+                    },
+                    StatusKind::Info,
+                );
+            }
+            KeyCode::Char('l') if self.right == RightMode::Browse => {
+                self.mode = InputMode::Selector;
+                self.input = self.selector_text.clone();
+                self.dirty = true;
+            }
+
+            // Cycle kubelet / containerd / kernel on a Node's log tab.
+            KeyCode::Char('v')
+                if self.view == View::Logs
+                    && self
+                        .log_target()
+                        .is_some_and(|t| t.kind.eq_ignore_ascii_case("node")) =>
+            {
+                self.node_service = self.node_service.wrapping_add(1);
+                self.node_logs_for = None;
+                self.sync_logs();
+                let service = self.node_service();
+                self.set_status(format!("node service: {service}"), StatusKind::Info);
+            }
+
             KeyCode::Char('W') if self.view == View::Events => {
                 self.warnings_only = !self.warnings_only;
                 self.rebuild_event_view();
@@ -1150,6 +1353,7 @@ impl App {
                     }
                     InputMode::Filter => self.apply_filter_input(&value),
                     InputMode::Namespace => self.set_namespace(&value),
+                    InputMode::Selector => self.apply_selector(&value),
                     InputMode::RowFilter => {
                         self.row_filter = if value.trim().is_empty() {
                             None
@@ -1285,6 +1489,41 @@ impl App {
         // attach, not just the Browse → Detail transition.
         self.sync_logs();
         self.dirty = true;
+    }
+
+    /// Set the selector from the command line, before anything is listed.
+    pub fn set_selector(&mut self, raw: &str) {
+        match LabelSelector::parse(raw) {
+            Ok(selector) => {
+                self.selector = selector;
+                self.selector_text = raw.trim().to_string();
+            }
+            Err(err) => self.set_status(format!("bad --selector: {err}"), StatusKind::Error),
+        }
+    }
+
+    /// Apply a `-l` selector. It narrows the browsed list server-side on the
+    /// next refresh, and narrows which pods a workload's logs come from now.
+    fn apply_selector(&mut self, raw: &str) {
+        match LabelSelector::parse(raw) {
+            Ok(selector) => {
+                self.selector = selector;
+                self.selector_text = raw.trim().to_string();
+                self.request_rows();
+                // The stream set depends on the selector, so re-derive it.
+                self.attached_to = None;
+                self.sync_logs();
+                self.set_status(
+                    if self.selector_text.is_empty() {
+                        "selector cleared".to_string()
+                    } else {
+                        format!("selector: {}", self.selector_text)
+                    },
+                    StatusKind::Info,
+                );
+            }
+            Err(err) => self.set_status(format!("bad selector: {err}"), StatusKind::Error),
+        }
     }
 
     fn set_namespace(&mut self, value: &str) {

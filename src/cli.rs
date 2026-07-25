@@ -20,6 +20,11 @@ pub struct Cli {
     #[arg(long, env = "KSCOPE_CONTEXT")]
     pub context: Option<String>,
 
+    /// Label selector, e.g. `app=api,tier!=batch`. Narrows both the browsed
+    /// list and the pods a workload's logs are collected from.
+    #[arg(short = 'l', long, value_name = "SELECTOR")]
+    pub selector: Option<String>,
+
     /// Path to a kscope config file.
     #[arg(short, long, value_name = "FILE", env = "KSCOPE_CONFIG")]
     pub config: Option<PathBuf>,
