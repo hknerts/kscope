@@ -4,7 +4,7 @@
 
 kscope does two things and tries to do them very well: it shows you container
 logs, and it shows you what your cluster is actually consuming. It is not a
-replacement for `k9s` — there is no editing, scaling, deleting or shelling in.
+replacement for k9s, there is no editing, scaling, deleting or shelling in.
 That is the point: kscope is safe to hand to anyone with a view-only token, and
 it stays fast because it never has to be anything else.
 
