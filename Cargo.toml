@@ -2,11 +2,13 @@
 name = "kscope"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# Floor is set by kube 4.2 (1.89); ratatui 0.30 needs 1.88 and clap 4.6 needs
+# 1.85, so this cannot be lowered without downgrading dependencies.
+rust-version = "1.89"
 authors = ["The kscope contributors"]
-description = "A fast, read-only Kubernetes TUI focused on logs and live metrics"
-repository = "https://github.com/kscope-tui/kscope"
-homepage = "https://github.com/kscope-tui/kscope"
+description = "A fast, read-only Kubernetes TUI: browse any resource, then read its logs, metrics and events"
+repository = "https://github.com/hknerts/kscope"
+homepage = "https://github.com/hknerts/kscope"
 documentation = "https://docs.rs/kscope"
 license = "MIT"
 readme = "README.md"

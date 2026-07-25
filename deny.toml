@@ -15,8 +15,11 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
-  "Unicode-DFS-2016",
   "Unicode-3.0",
+  # webpki-root-certs ships Mozilla's CA bundle, which is data rather than
+  # code and carries the Community Data License Agreement. Pulled in by
+  # kube-client via rustls-platform-verifier.
+  "CDLA-Permissive-2.0",
   "Zlib",
   "MPL-2.0",
 ]

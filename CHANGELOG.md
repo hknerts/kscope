@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Reworked the interface into two panes.** The left pane lists kubeconfig
+  contexts; the right pane browses a resource type and opens one object into
+  logs, metrics and events tabs. The old pod sidebar is gone, along with its
+  `a` (attach all) and `Ctrl-p` (filter pods) bindings — the list filter is now
+  `/`, and opening an object attaches its logs.
+- `Esc` now steps out of the detail view instead of quitting outright; use `q`
+  or `Ctrl-c` to quit.
 - Logs are now unlimited by default. Attaching requests the container's entire
   retained history instead of a 500-line tail, and the in-memory buffer is
   unbounded (`logs.buffer_lines = 0`) instead of a 50 000-line ring buffer.
@@ -15,8 +22,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`:` resource palette** with k9s-style autocompletion. Candidates come from
+  the cluster's discovery API, so CRDs complete like built-in kinds, and
+  kubectl short names (`po`, `deploy`, `pvc`, …), singular kinds and fuzzy input
+  all resolve.
+- **Events tab** (`3`), scoped to the object you have open, with a warnings-only
+  toggle (`W`).
+- **Live context switching**: `Enter` on a context rebuilds the client and
+  restarts every poller without restarting kscope.
 - `--since SECONDS` to fetch only recent lines.
-- Live memory usage of the retained buffer in the status bar.
+- `Ctrl-r` to re-list the current resource type.
+
+### Fixed
+
+- Changing the namespace scope (`Ctrl-n`) now restarts the inventory, metrics
+  and event pollers, which were previously left bound to the old namespace.
+- `kube` 4.2 moved the rustls crypto provider behind a feature flag; without it
+  every run panicked at client construction.
 
 ## [0.1.0] - 2026-07-24
 
@@ -36,5 +58,5 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Non-interactive `--dump` mode for scripts.
 - Configuration file with theme and highlight customisation.
 
-[Unreleased]: https://github.com/kscope-tui/kscope/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/kscope-tui/kscope/releases/tag/v0.1.0
+[Unreleased]: https://github.com/hknerts/kscope/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/hknerts/kscope/releases/tag/v0.1.0

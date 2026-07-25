@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Question or usage help
-    url: https://github.com/kscope-tui/kscope/discussions
+    url: https://github.com/hknerts/kscope/discussions
     about: Ask in Discussions; issues are for bugs and feature requests.

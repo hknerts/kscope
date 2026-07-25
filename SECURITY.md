@@ -11,7 +11,7 @@ The latest minor release receives security fixes.
 ## Reporting a vulnerability
 
 Please **do not** open a public issue. Report privately through
-[GitHub Security Advisories](https://github.com/kscope-tui/kscope/security/advisories/new)
+[GitHub Security Advisories](https://github.com/hknerts/kscope/security/advisories/new)
 or by emailing **security@kscope.dev**.
 
 Expect an acknowledgement within 3 working days and an assessment within 10.
