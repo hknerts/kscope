@@ -25,9 +25,9 @@ Two panes, and one key that drives everything:
 │   staging  ││ payments   ledger-58f4       0/1       12m  │
 └────────────┘└─────────────────────────────────────────────┘
                              Enter ↓
-┌─ contexts ─┐┌ payments/ledger-58f4  1:logs 2:metrics 3:events 4:describe ┐
-│ ● prod-eu  ││ 12:04:11  WARN  retrying payment authorisation             │
-└────────────┘└────────────────────────────────────────────────────────────┘
+┌─ contexts ─┐┌ payments/ledger-58f4  l:logs m:monitoring E:events  d: describe ┐
+│ ● prod-eu  ││ 12:04:11  WARN  retrying payment authorisation                  │
+└────────────┘└─────────────────────────────────────────────────────────────────┘
 ```
 
 * **`:` picks the resource type**, with k9s-style autocompletion — `:po`,
@@ -37,10 +37,11 @@ Two panes, and one key that drives everything:
 * **The left pane lists your kubeconfig contexts.** `Enter` switches cluster in
   place — the client is rebuilt and every poller restarts, without restarting
   kscope.
-* **`Enter` opens an object** into four tabs: logs, metrics, events and a
-  `describe`. `Esc` goes back to the list. Logs follow whatever you opened — a
-  Deployment streams all its replicas, a Service streams what it selects, a Node
-  shows its kubelet journal.
+* **`Enter` opens an object's logs**, `m` its monitoring, `E` its events, and
+  `d` describes it in an overlay. `Esc` steps back out. Everything is scoped to
+  what you opened: a Deployment streams all its replicas *and* totals their CPU
+  and memory, a Service follows what it selects, a Node shows its kubelet
+  journal and what is scheduled on it.
 
 ## Why
 
@@ -54,10 +55,11 @@ one screen:
   into one timeline, and a rollout hands the stream over to the new pods instead
   of going quiet on the old ones. Plus paging, regex search with match
   highlighting, level filtering, automatic error highlighting, export to file.
-* **Metrics** — live CPU and memory at **node**, **pod** *and* **container**
-  granularity, with usage-versus-limit percentages and rolling sparklines, plus
-  **how full each PersistentVolumeClaim actually is** — a figure the Kubernetes
-  API does not carry at all.
+* **Monitoring** — scoped to the object in hand, not a cluster-wide table: a
+  Deployment totals its replicas, a pod breaks down by container with rolling
+  sparklines, a node shows its own load and what is scheduled on it, and a
+  claim shows **how full it actually is** — a figure the Kubernetes API does not
+  carry at all.
 * **Events** — scoped to the object you have open, warnings separable with one
   key, so "why is this pending?" is one `3` away.
 * **Triage** — `!` narrows any listing to just the objects in trouble, reading
@@ -156,11 +158,12 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 
 | Key | Action |
 | --- | --- |
-| `Enter` | open the object (logs / metrics / events / describe) |
-| `1` `2` `3` `4` | open it straight onto logs / metrics / events / describe |
+| `Enter`, `l` | open the object's logs |
+| `m` / `E` | open its monitoring / events |
+| `d` | describe it, as an overlay (`d` or `Esc` closes) |
 | `/` | filter the list by name or namespace |
 | `!` | show only the objects in trouble |
-| `l` | set a label selector |
+| `L` | set a label selector |
 | `Ctrl-r` | re-list now |
 
 ### Contexts pane
@@ -169,13 +172,14 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | --- | --- |
 | `Enter` | switch to that cluster |
 
-### Detail — `1` logs
+### Detail — `l` logs
 
 | Key | Action |
 | --- | --- |
 | `/` then `n` / `N` | regex search, next / previous match |
 | `\` | filter lines; prefix with `!` to exclude |
 | `L` / `e` | cycle minimum level / errors only |
+| `l` / `m` / `E` | switch to logs / monitoring / events |
 | `F` / `w` | toggle follow / wrapping |
 | `t` / `p` | toggle timestamps / previous (crashed) container |
 | `c` / `s` | clear buffer / save visible buffer to a file |
@@ -183,17 +187,18 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
 
-### Detail — `2` metrics, `3` events, `4` describe
+### Detail — `m` monitoring, `E` events, `d` describe
 
 | Key | Action |
 | --- | --- |
-| `m` / `S` | switch metric table / cycle sort order |
+| `S` | cycle sort: name / cpu / memory |
 | `W` | events: warnings only |
-| `j` `k` `g` `G` | describe: scroll |
+| `j` `k` `g` `G` | scroll the describe overlay |
 
-`4` renders the object as YAML — every kind, CRDs included — with the noise
+`d` renders the object as YAML — every kind, CRDs included — with the noise
 `kubectl` also hides stripped out: managed fields, resource versions and the
-`last-applied-configuration` annotation.
+`last-applied-configuration` annotation. It is an overlay rather than a tab,
+and works straight from the list without opening the object first.
 
 > The logs tab resolves whatever you opened down to pods: a Deployment,
 > StatefulSet, DaemonSet, Job or ReplicaSet through its replicas, a Service or

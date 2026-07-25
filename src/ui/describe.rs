@@ -4,31 +4,29 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
 
-use crate::app::{App, RightMode, View};
+use crate::app::App;
 use crate::config::Theme;
 
 pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let theme = &app.config.theme;
     let dim = Style::default().fg(Theme::color(&theme.trace));
-    let focused = app.right == RightMode::Detail && app.view == View::Describe;
-
     let subject = app
         .selected_row()
         .map(|r| r.key())
         .unwrap_or_else(|| "—".into());
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if focused {
-            theme.border_focus()
-        } else {
-            theme.border()
-        }))
-        .title(format!(" describe · {subject} "));
+        .border_style(Style::default().fg(theme.border_focus()))
+        .title(format!(" describe · {subject}   (d or Esc to close) "));
 
+    // An overlay rather than a tab: describe is a different question about the
+    // object you already have open, not a different view of it.
+    let area = super::centered_rect(84, 88, area);
+    f.render_widget(Clear, area);
     let inner = block.inner(area);
     f.render_widget(block, area);
     app.viewport_height = inner.height as usize;

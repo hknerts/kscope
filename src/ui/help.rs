@@ -16,8 +16,12 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             (":", "pick a resource type (pods, deploy, svc, crds…)"),
             ("Tab", "accept the completion / cycle matches"),
             ("↑ / ↓", "move through the completions"),
-            ("Enter", "open the highlighted object"),
+            ("Enter / l", "open the object's logs"),
+            ("d", "describe it (overlay; d or Esc closes)"),
+            ("m / E", "monitoring / events for it"),
             ("/", "filter the list by name or namespace"),
+            ("!", "show only the objects in trouble"),
+            ("L", "set a label selector"),
             ("Ctrl-n", "change the namespace scope"),
             ("Ctrl-r", "re-list now"),
         ],
@@ -45,7 +49,7 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "detail: 1 logs",
+        "detail: l logs",
         &[
             ("/", "search (regex, smart case)"),
             ("n / N", "next / previous match"),
@@ -59,11 +63,13 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
-        "detail: 2 metrics, 3 events",
+        "detail: m monitoring, E events, d describe",
         &[
-            ("m", "cycle the node, pod and volume tables"),
+            ("m", "monitoring, scoped to the open object"),
             ("S", "cycle sort: name / cpu / memory"),
+            ("E", "events for the open object"),
             ("W", "events: warnings only"),
+            ("d", "describe as YAML; j/k/g/G scroll it"),
         ],
     ),
 ];

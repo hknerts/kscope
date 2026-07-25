@@ -36,7 +36,6 @@ pub enum View {
     Logs,
     Metrics,
     Events,
-    Describe,
 }
 
 /// Which pane has the keyboard.
@@ -245,6 +244,9 @@ pub struct App {
     volume_usage_pending: bool,
 
     // ------------------------------------------------------------- describe
+    /// Describe is an overlay rather than a tab: it is a different question
+    /// about the same object, not a different view of it.
+    pub describe_open: bool,
     /// Rendered YAML of the open object, and which object it belongs to.
     pub describe_text: String,
     pub describe_scroll: usize,
@@ -346,6 +348,7 @@ impl App {
             volume_usage_error: None,
             volume_usage_at: None,
             volume_usage_pending: false,
+            describe_open: false,
             describe_text: String::new(),
             describe_scroll: 0,
             describe_error: None,
@@ -741,9 +744,27 @@ impl App {
         self.dirty = true;
     }
 
+    /// Open or close the describe overlay for the object in hand.
+    fn toggle_describe(&mut self) {
+        if self.describe_open {
+            self.describe_open = false;
+            self.dirty = true;
+            return;
+        }
+        // Describe works straight from the list too — you should not have to
+        // open an object first just to look at its YAML.
+        if self.selected_row().is_none() {
+            self.set_status("nothing selected", StatusKind::Warn);
+            return;
+        }
+        self.describe_open = true;
+        self.sync_describe();
+        self.dirty = true;
+    }
+
     /// Ask for the open object's full YAML, unless it is already rendered.
     fn sync_describe(&mut self) {
-        if self.right != RightMode::Detail || self.view != View::Describe {
+        if !self.describe_open {
             return;
         }
         let Some(row) = self.selected_row() else {
@@ -1287,10 +1308,10 @@ impl App {
                 };
                 self.dirty = true;
             }
-            KeyCode::Char('1') => self.set_view(View::Logs),
-            KeyCode::Char('2') => self.set_view(View::Metrics),
-            KeyCode::Char('3') => self.set_view(View::Events),
-            KeyCode::Char('4') => self.set_view(View::Describe),
+            KeyCode::Char('l') => self.set_view(View::Logs),
+            KeyCode::Char('m') => self.set_view(View::Metrics),
+            KeyCode::Char('E') => self.set_view(View::Events),
+            KeyCode::Char('d') => self.toggle_describe(),
 
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
@@ -1340,6 +1361,13 @@ impl App {
                 self.h_scroll = 0;
                 let msg = if self.wrap { "wrap on" } else { "wrap off" };
                 self.set_status(msg, StatusKind::Info);
+            }
+            // `L` is the label selector while browsing, and the log level
+            // threshold once a log view is open — the two never overlap.
+            KeyCode::Char('L') if self.right == RightMode::Browse => {
+                self.mode = InputMode::Selector;
+                self.input = self.selector_text.clone();
+                self.dirty = true;
             }
             KeyCode::Char('L') => {
                 let mut filter = self.buffer.filter.clone();
@@ -1407,11 +1435,6 @@ impl App {
                     StatusKind::Info,
                 );
             }
-            KeyCode::Char('l') if self.right == RightMode::Browse => {
-                self.mode = InputMode::Selector;
-                self.input = self.selector_text.clone();
-                self.dirty = true;
-            }
 
             // Cycle kubelet / containerd / kernel on a Node's log tab.
             KeyCode::Char('v')
@@ -1445,20 +1468,18 @@ impl App {
                 let label = self.sort_by.label();
                 self.set_status(format!("sorting by {label}"), StatusKind::Info);
             }
-            KeyCode::Char('m') => {
-                self.metric_pane = match self.metric_pane {
-                    MetricPane::Nodes => MetricPane::Pods,
-                    MetricPane::Pods => MetricPane::Volumes,
-                    MetricPane::Volumes => MetricPane::Nodes,
-                };
-                self.dirty = true;
-            }
+
             _ => {}
         }
     }
 
-    /// `Esc` steps back out: detail → browse → quit.
+    /// `Esc` steps back out: describe → detail → browse → quit.
     fn on_escape(&mut self) {
+        if self.describe_open {
+            self.describe_open = false;
+            self.dirty = true;
+            return;
+        }
         match self.right {
             RightMode::Detail => {
                 self.right = RightMode::Browse;
@@ -1681,6 +1702,15 @@ impl App {
     }
 
     fn move_cursor(&mut self, delta: isize) {
+        if self.describe_open {
+            let max = self
+                .describe_len()
+                .saturating_sub(self.viewport_height.max(1));
+            self.describe_scroll =
+                (self.describe_scroll as isize + delta).clamp(0, max as isize) as usize;
+            self.dirty = true;
+            return;
+        }
         match (self.pane, self.right) {
             (Pane::Contexts, _) => {
                 let len = self.contexts.len();
@@ -1705,14 +1735,6 @@ impl App {
             }
             (Pane::Resources, RightMode::Detail) => match self.view {
                 View::Logs => self.scroll_by(delta),
-                View::Describe => {
-                    let max = self
-                        .describe_len()
-                        .saturating_sub(self.viewport_height.max(1));
-                    self.describe_scroll =
-                        (self.describe_scroll as isize + delta).clamp(0, max as isize) as usize;
-                    self.dirty = true;
-                }
                 View::Events => {
                     let len = self.event_view.len();
                     if len > 0 {
@@ -1797,9 +1819,10 @@ impl App {
             Pane::Contexts => self.switch_context(),
             Pane::Resources => {
                 if self.right == RightMode::Browse && self.selected_row().is_some() {
+                    // Enter is the same as `l`: the common case is logs.
+                    self.view = View::Logs;
                     self.right = RightMode::Detail;
                     self.sync_logs();
-                    self.sync_describe();
                     self.dirty = true;
                 }
             }

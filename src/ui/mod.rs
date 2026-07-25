@@ -54,6 +54,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_completions(f, app, chunks[1]);
     }
 
+    if app.describe_open {
+        describe::draw(f, app, area);
+    }
+
     if app.mode == InputMode::Help {
         help::draw(f, app, area);
     }
@@ -93,19 +97,17 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
                 .fg(theme.accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        tab("1:logs", app.view == View::Logs),
-        tab("2:metrics", app.view == View::Metrics),
-        tab("3:events", app.view == View::Events),
-        tab("4:describe", app.view == View::Describe),
+        tab("l:logs", app.view == View::Logs),
+        tab("m:monitoring", app.view == View::Metrics),
+        tab("E:events", app.view == View::Events),
     ];
-    spans.push(Span::styled("   Esc: back", dim));
+    spans.push(Span::styled("   d: describe   Esc: back", dim));
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
     match app.view {
         View::Logs => logs::draw(f, app, rows[1]),
         View::Metrics => metrics::draw(f, app, rows[1]),
         View::Events => events::draw(f, app, rows[1]),
-        View::Describe => describe::draw(f, app, rows[1]),
     }
 }
 
@@ -300,14 +302,17 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
         (Pane::Resources, RightMode::Browse) => {
             bindings.push(("j/k", "move"));
             bindings.push(("Enter", "open"));
+            bindings.push(("Enter", "open logs"));
+            bindings.push(("d", "describe"));
             bindings.push(("/", "filter list"));
             bindings.push(("!", "problems only"));
-            bindings.push(("l", "label selector"));
+            bindings.push(("L", "label selector"));
             bindings.push(("Ctrl-n", "namespace"));
             bindings.push(("Ctrl-r", "refresh"));
         }
         (Pane::Resources, RightMode::Detail) => {
-            bindings.push(("1-4", "logs/metrics/events/describe"));
+            bindings.push(("l/m/E", "logs/monitoring/events"));
+            bindings.push(("d", "describe"));
             bindings.push(("Esc", "back to list"));
             match app.view {
                 View::Logs => {
@@ -320,15 +325,10 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
                     bindings.push(("c/s", "clear/save"));
                 }
                 View::Metrics => {
-                    bindings.push(("m", "cycle tables"));
                     bindings.push(("S", "sort"));
                 }
                 View::Events => {
                     bindings.push(("W", "warnings only"));
-                }
-                View::Describe => {
-                    bindings.push(("j/k", "scroll"));
-                    bindings.push(("g/G", "top/bottom"));
                 }
             }
         }
@@ -446,12 +446,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(theme.error()),
                     ));
                 }
-            }
-            View::Describe => {
-                spans.push(Span::styled(
-                    format!("{} lines of yaml", app.describe_len()),
-                    dim,
-                ));
             }
             View::Metrics => {
                 let age = app
