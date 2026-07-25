@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Detail views are switched by letter, not number**: `Enter` or `l` for logs,
+  `m` for monitoring, `E` for events, `d` for the describe overlay. The label
+  selector moved from `l` to `L` while browsing, where it no longer collides.
+- **Monitoring is scoped to the object you opened** rather than showing
+  cluster-wide tables. A Deployment totals its replicas and lists them, a pod
+  breaks down by container, a node shows its own load plus what is scheduled on
+  it, a claim shows its fullness. `m` no longer cycles node/pod/volume tables,
+  because there is nothing to cycle.
 - **Reworked the interface into two panes.** The left pane lists kubeconfig
   contexts; the right pane browses a resource type and opens one object into
   logs, metrics and events tabs. The old pod sidebar is gone, along with its
@@ -22,10 +30,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Describe tab** (`4`): renders any object as YAML, CRDs included, with
+- **Describe** (`d`): renders any object as YAML, CRDs included, with
   managed fields, resource versions and the `last-applied-configuration`
   annotation stripped. The YAML emitter is written in-tree rather than pulling
-  in the unmaintained `serde_yaml`.
+  in the unmaintained `serde_yaml`. It is an overlay rather than a tab, and
+  works straight from the list without opening the object first.
 - **Live PersistentVolumeClaim usage** in the metrics view, read from kubelet's
   `stats/summary`. The Kubernetes API only knows the *requested* size; this is
   how full the volume actually is. Needs `nodes/proxy`, and only exists for
