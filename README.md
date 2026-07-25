@@ -25,9 +25,9 @@ Two panes, and one key that drives everything:
 │   staging  ││ payments   ledger-58f4       0/1       12m  │
 └────────────┘└─────────────────────────────────────────────┘
                              Enter ↓
-┌─ contexts ─┐┌ payments/ledger-58f4  1:logs 2:metrics 3:events  Esc: back ┐
-│ ● prod-eu  ││ 12:04:11  WARN  retrying payment authorisation            │
-└────────────┘└───────────────────────────────────────────────────────────┘
+┌─ contexts ─┐┌ payments/ledger-58f4  1:logs 2:metrics 3:events 4:describe ┐
+│ ● prod-eu  ││ 12:04:11  WARN  retrying payment authorisation             │
+└────────────┘└────────────────────────────────────────────────────────────┘
 ```
 
 * **`:` picks the resource type**, with k9s-style autocompletion — `:po`,
@@ -37,8 +37,8 @@ Two panes, and one key that drives everything:
 * **The left pane lists your kubeconfig contexts.** `Enter` switches cluster in
   place — the client is rebuilt and every poller restarts, without restarting
   kscope.
-* **`Enter` opens an object** into three tabs: its logs, its metrics, its
-  events. `Esc` goes back to the list. Logs follow whatever you opened — a
+* **`Enter` opens an object** into four tabs: logs, metrics, events and a
+  `describe`. `Esc` goes back to the list. Logs follow whatever you opened — a
   Deployment streams all its replicas, a Service streams what it selects, a Node
   shows its kubelet journal.
 
@@ -55,7 +55,9 @@ one screen:
   of going quiet on the old ones. Plus paging, regex search with match
   highlighting, level filtering, automatic error highlighting, export to file.
 * **Metrics** — live CPU and memory at **node**, **pod** *and* **container**
-  granularity, with usage-versus-limit percentages and rolling sparklines.
+  granularity, with usage-versus-limit percentages and rolling sparklines, plus
+  **how full each PersistentVolumeClaim actually is** — a figure the Kubernetes
+  API does not carry at all.
 * **Events** — scoped to the object you have open, warnings separable with one
   key, so "why is this pending?" is one `3` away.
 * **Triage** — `!` narrows any listing to just the objects in trouble, reading
@@ -154,8 +156,8 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 
 | Key | Action |
 | --- | --- |
-| `Enter` | open the object (logs / metrics / events) |
-| `1` `2` `3` | open it straight onto logs / metrics / events |
+| `Enter` | open the object (logs / metrics / events / describe) |
+| `1` `2` `3` `4` | open it straight onto logs / metrics / events / describe |
 | `/` | filter the list by name or namespace |
 | `!` | show only the objects in trouble |
 | `l` | set a label selector |
@@ -181,12 +183,17 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
 
-### Detail — `2` metrics, `3` events
+### Detail — `2` metrics, `3` events, `4` describe
 
 | Key | Action |
 | --- | --- |
 | `m` / `S` | switch metric table / cycle sort order |
 | `W` | events: warnings only |
+| `j` `k` `g` `G` | describe: scroll |
+
+`4` renders the object as YAML — every kind, CRDs included — with the noise
+`kubectl` also hides stripped out: managed fields, resource versions and the
+`last-applied-configuration` annotation.
 
 > The logs tab resolves whatever you opened down to pods: a Deployment,
 > StatefulSet, DaemonSet, Job or ReplicaSet through its replicas, a Service or
@@ -289,8 +296,9 @@ the built-in `view` ClusterRole instead. Everything degrades gracefully: a kind
 you cannot list reports the error in the pane it belongs to and leaves the rest
 of the tool working.
 
-Node journals (`v` on an open Node) are the one thing `view` does not cover, and
-they are worth granting deliberately rather than by default:
+Node journals (`v` on an open Node) and live PVC usage are the two things `view`
+does not cover. Both read the kubelet through the same subresource, and are
+worth granting deliberately rather than by default:
 
 ```yaml
   - apiGroups: [""]
@@ -298,9 +306,15 @@ they are worth granting deliberately rather than by default:
     verbs: ["get"]
 ```
 
-They also need Kubernetes 1.27+ with the `NodeLogQuery` feature gate and
-kubelet's `enableSystemLogHandler` and `enableSystemLogQuery` both enabled.
-Without them kscope says which of the two is missing rather than failing blankly.
+**Node journals** additionally need Kubernetes 1.27+ with the `NodeLogQuery`
+feature gate and kubelet's `enableSystemLogHandler` and `enableSystemLogQuery`
+both enabled. Without them kubelet quietly serves a `/var/log` directory index
+instead; kscope detects that and says so rather than showing you HTML.
+
+**PVC usage** comes from kubelet's `stats/summary`, so it only exists for volume
+plugins that report metrics. Most CSI drivers do; `hostPath` and the
+`local-path` provisioner used by kind and minikube do not, and there the column
+reads `-` with the reason in the panel title.
 
 ## Performance notes
 

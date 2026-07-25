@@ -50,7 +50,27 @@ pub async fn fetch(
             "node {node} returned no {service} logs — the service may not exist on this node"
         ));
     }
+    // With NodeLogQuery disabled the endpoint ignores `query=` entirely and
+    // falls back to serving a browsable /var/log index. That is a 200 with an
+    // HTML directory listing in it, which must not be mistaken for logs.
+    if is_directory_index(&body) {
+        return Err(anyhow!(
+            "node {node} served a /var/log directory index instead of {service} logs.\n\n\
+             This node does not have the NodeLogQuery feature gate enabled, so the log query \
+             API is unavailable and kubelet fell back to its legacy file browser. Needs \
+             Kubernetes 1.27+ with NodeLogQuery on, plus kubelet's enableSystemLogHandler and \
+             enableSystemLogQuery both true."
+        ));
+    }
     Ok(body)
+}
+
+/// kubelet's legacy `/var/log` browser answers with a minimal HTML page. Real
+/// journal output never does, so this is a safe thing to reject.
+fn is_directory_index(body: &str) -> bool {
+    let head = body.trim_start();
+    let lower = head.to_ascii_lowercase();
+    lower.starts_with("<!doctype html") || lower.starts_with("<html") || lower.starts_with("<pre>")
 }
 
 /// Turn the two failure modes people actually hit into something actionable.
@@ -86,5 +106,26 @@ mod tests {
     #[test]
     fn passes_other_errors_through_untouched() {
         assert_eq!(explain("connection reset"), "connection reset");
+    }
+
+    #[test]
+    fn recognises_kubelets_legacy_var_log_index() {
+        // Exactly what a node without the NodeLogQuery gate answers with — a
+        // 200 that would otherwise be shown as if it were journal output.
+        let body = "<!doctype html>\n<meta name=\"viewport\" content=\"width=device-width\">\n\
+                    <pre>\n<a href=\"alternatives.log\">alternatives.log</a>\n\
+                    <a href=\"containers/\">containers/</a>\n</pre>\n";
+        assert!(is_directory_index(body));
+        assert!(is_directory_index("<html><body>nope</body></html>"));
+        assert!(is_directory_index("  <PRE>\n<a href=\"x\">x</a>\n</PRE>"));
+    }
+
+    #[test]
+    fn real_journal_output_is_not_mistaken_for_an_index() {
+        assert!(!is_directory_index(
+            "Jul 25 09:10:46 node kubelet[1234]: I0725 09:10:46.123 server.go:1 Started kubelet"
+        ));
+        assert!(!is_directory_index("{\"msg\":\"<html> in a log line\"}"));
+        assert!(!is_directory_index(""));
     }
 }

@@ -36,6 +36,7 @@ pub enum View {
     Logs,
     Metrics,
     Events,
+    Describe,
 }
 
 /// Which pane has the keyboard.
@@ -235,6 +236,22 @@ pub struct App {
     pub volume_selected: usize,
     pub sort_by: SortBy,
 
+    // -------------------------------------------------------- volume usage
+    /// Live PVC usage from the kubelets, keyed `namespace/claim`.
+    pub volume_usage: std::collections::HashMap<String, crate::k8s::volume_stats::VolumeUsage>,
+    /// Why the usage columns are empty, when they are.
+    pub volume_usage_error: Option<String>,
+    volume_usage_at: Option<Instant>,
+    volume_usage_pending: bool,
+
+    // ------------------------------------------------------------- describe
+    /// Rendered YAML of the open object, and which object it belongs to.
+    pub describe_text: String,
+    pub describe_scroll: usize,
+    pub describe_error: Option<String>,
+    describe_for: Option<String>,
+    pub describe_loading: bool,
+
     /// Which node service the logs tab is showing when a Node is open.
     pub node_service: usize,
     /// Set while a node log request is in flight.
@@ -325,6 +342,15 @@ impl App {
             pod_metric_selected: 0,
             volume_selected: 0,
             sort_by: SortBy::Cpu,
+            volume_usage: std::collections::HashMap::new(),
+            volume_usage_error: None,
+            volume_usage_at: None,
+            volume_usage_pending: false,
+            describe_text: String::new(),
+            describe_scroll: 0,
+            describe_error: None,
+            describe_for: None,
+            describe_loading: false,
             node_service: 0,
             node_logs_loading: false,
             node_logs_for: None,
@@ -661,6 +687,115 @@ impl App {
     /// Called every time the logs tab becomes visible or the selection moves,
     /// so the buffer always belongs to exactly one object. A no-op when the
     /// streams already point at the right pod.
+    /// Usage of one claim, if a kubelet has reported it.
+    pub fn usage_for(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Option<&crate::k8s::volume_stats::VolumeUsage> {
+        self.volume_usage.get(&format!("{namespace}/{name}"))
+    }
+
+    /// Whether usage has been asked for at least once, so the UI can tell
+    /// "not fetched yet" apart from "fetched, and the driver reports nothing".
+    pub fn volume_usage_polled(&self) -> bool {
+        self.volume_usage_at.is_some()
+    }
+
+    /// True when the volumes table is on screen and its usage figures are due
+    /// a refresh. Polled rather than streamed: this is one request per node,
+    /// so it runs on the metrics interval and only while it is being looked at.
+    pub fn take_volume_usage_request(&mut self) -> bool {
+        let looking = self.right == RightMode::Detail
+            && self.view == View::Metrics
+            && self.metric_pane == MetricPane::Volumes;
+        if !looking || self.volume_usage_pending || self.inventory.nodes.is_empty() {
+            return false;
+        }
+        let due = self
+            .volume_usage_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(self.config.metrics.refresh_ms));
+        if !due {
+            return false;
+        }
+        self.volume_usage_pending = true;
+        true
+    }
+
+    pub fn on_volume_usage(
+        &mut self,
+        result: Result<
+            std::collections::HashMap<String, crate::k8s::volume_stats::VolumeUsage>,
+            String,
+        >,
+    ) {
+        self.volume_usage_pending = false;
+        self.volume_usage_at = Some(Instant::now());
+        match result {
+            Ok(usage) => {
+                self.volume_usage = usage;
+                self.volume_usage_error = None;
+            }
+            Err(err) => self.volume_usage_error = Some(err),
+        }
+        self.dirty = true;
+    }
+
+    /// Ask for the open object's full YAML, unless it is already rendered.
+    fn sync_describe(&mut self) {
+        if self.right != RightMode::Detail || self.view != View::Describe {
+            return;
+        }
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let Some(kind) = self.current_type() else {
+            return;
+        };
+        let key = format!("{}/{}/{}", kind.qualified(), row.namespace, row.name);
+        if self.describe_for.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.describe_for = Some(key);
+        self.describe_text.clear();
+        self.describe_error = None;
+        self.describe_scroll = 0;
+        self.describe_loading = true;
+        self.dirty = true;
+    }
+
+    /// The pending describe request, taken by the main loop.
+    pub fn take_describe_request(&mut self) -> Option<(ResourceType, String, String)> {
+        if !self.describe_loading {
+            return None;
+        }
+        self.describe_loading = false;
+        let kind = self.current_type()?.clone();
+        let row = self.selected_row()?;
+        Some((kind, row.namespace.clone(), row.name.clone()))
+    }
+
+    pub fn on_describe(&mut self, result: Result<serde_json::Value, String>) {
+        match result {
+            Ok(object) => {
+                self.describe_text = crate::describe::render(&object);
+                self.describe_error = None;
+            }
+            Err(err) => {
+                // Let the next visit retry rather than caching the failure.
+                self.describe_for = None;
+                self.describe_error = Some(err);
+            }
+        }
+        self.describe_scroll = 0;
+        self.dirty = true;
+    }
+
+    /// Number of lines in the rendered object.
+    pub fn describe_len(&self) -> usize {
+        self.describe_text.lines().count()
+    }
+
     /// The node service the logs tab is showing (`kubelet`, `containerd`, …).
     pub fn node_service(&self) -> &'static str {
         crate::k8s::node_logs::COMMON_SERVICES
@@ -1155,6 +1290,7 @@ impl App {
             KeyCode::Char('1') => self.set_view(View::Logs),
             KeyCode::Char('2') => self.set_view(View::Metrics),
             KeyCode::Char('3') => self.set_view(View::Events),
+            KeyCode::Char('4') => self.set_view(View::Describe),
 
             // navigation
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
@@ -1488,6 +1624,7 @@ impl App {
         // Unconditional: arriving on the logs tab from *any* other tab has to
         // attach, not just the Browse → Detail transition.
         self.sync_logs();
+        self.sync_describe();
         self.dirty = true;
     }
 
@@ -1563,10 +1700,19 @@ impl App {
                     (self.row_selected as isize + delta).clamp(0, len as isize - 1) as usize;
                 // The detail tabs follow the browser's selection.
                 self.rebuild_event_view();
+                self.sync_describe();
                 self.dirty = true;
             }
             (Pane::Resources, RightMode::Detail) => match self.view {
                 View::Logs => self.scroll_by(delta),
+                View::Describe => {
+                    let max = self
+                        .describe_len()
+                        .saturating_sub(self.viewport_height.max(1));
+                    self.describe_scroll =
+                        (self.describe_scroll as isize + delta).clamp(0, max as isize) as usize;
+                    self.dirty = true;
+                }
                 View::Events => {
                     let len = self.event_view.len();
                     if len > 0 {
@@ -1618,6 +1764,7 @@ impl App {
                 self.rebuild_event_view();
             }
             (Pane::Resources, RightMode::Detail) => {
+                self.describe_scroll = 0;
                 self.follow = false;
                 self.scroll = 0;
             }
@@ -1635,6 +1782,9 @@ impl App {
                 self.rebuild_event_view();
             }
             (Pane::Resources, RightMode::Detail) => {
+                self.describe_scroll = self
+                    .describe_len()
+                    .saturating_sub(self.viewport_height.max(1));
                 self.follow = true;
                 self.scroll_to_bottom();
             }
@@ -1649,6 +1799,7 @@ impl App {
                 if self.right == RightMode::Browse && self.selected_row().is_some() {
                     self.right = RightMode::Detail;
                     self.sync_logs();
+                    self.sync_describe();
                     self.dirty = true;
                 }
             }

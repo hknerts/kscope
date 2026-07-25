@@ -217,6 +217,12 @@ async fn run(
     // Node journals are a one-shot fetch rather than a stream.
     type NodeLogs = (String, &'static str, Result<String, String>);
     let (node_tx, mut node_rx) = tokio::sync::mpsc::channel::<NodeLogs>(4);
+    let (desc_tx, mut desc_rx) = tokio::sync::mpsc::channel::<Result<serde_json::Value, String>>(4);
+    // PVC usage lives on the kubelet, not the API server, so it is polled
+    // separately and is allowed to be unavailable.
+    let (vol_tx, mut vol_rx) = tokio::sync::mpsc::channel::<
+        Result<std::collections::HashMap<String, k8s::volume_stats::VolumeUsage>, String>,
+    >(4);
 
     let frame_budget = Duration::from_millis(1000 / config.general.max_fps.max(1) as u64);
 
@@ -279,6 +285,8 @@ async fn run(
             Some((node, service, result)) = node_rx.recv() => {
                 app.on_node_logs(node, service, result);
             }
+            Some(result) = desc_rx.recv() => app.on_describe(result),
+            Some(result) = vol_rx.recv() => app.on_volume_usage(result),
             _ = ticker.tick() => {}
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
         }
@@ -324,6 +332,31 @@ async fn run(
                 met_tx.clone(),
                 evt_tx.clone(),
             );
+        }
+
+        // Service a pending describe request.
+        if let Some((kind, namespace, name)) = app.take_describe_request() {
+            let client = app.client.clone();
+            let tx = desc_tx.clone();
+            tokio::spawn(async move {
+                let result = k8s::resources::get(&client, &kind, &namespace, &name)
+                    .await
+                    .map_err(|e| format!("describing {name}: {e}"));
+                let _ = tx.send(result).await;
+            });
+        }
+
+        // Refresh PVC usage when the volumes table asks for it.
+        if app.take_volume_usage_request() {
+            let client = app.client.clone();
+            let nodes: Vec<String> = app.inventory.nodes.iter().map(|n| n.name.clone()).collect();
+            let tx = vol_tx.clone();
+            tokio::spawn(async move {
+                let result = k8s::volume_stats::collect(&client, &nodes)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(result).await;
+            });
         }
 
         // Service a pending node journal request.

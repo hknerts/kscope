@@ -22,6 +22,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Describe tab** (`4`): renders any object as YAML, CRDs included, with
+  managed fields, resource versions and the `last-applied-configuration`
+  annotation stripped. The YAML emitter is written in-tree rather than pulling
+  in the unmaintained `serde_yaml`.
+- **Live PersistentVolumeClaim usage** in the metrics view, read from kubelet's
+  `stats/summary`. The Kubernetes API only knows the *requested* size; this is
+  how full the volume actually is. Needs `nodes/proxy`, and only exists for
+  volume plugins that report metrics — `hostPath` and `local-path` do not, and
+  the panel says so instead of showing a bare `-`.
 - **Workload-level log streaming.** Opening a Deployment, StatefulSet,
   DaemonSet, Job or ReplicaSet merges every replica into one timeline; a Service
   or CRD resolves through its `spec.selector`; a Namespace or Node streams
@@ -56,6 +65,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Node journals no longer present kubelet's `/var/log` directory index as if it
+  were log output. With the `NodeLogQuery` feature gate disabled the endpoint
+  ignores the query and serves a browsable HTML index with a 200; that is now
+  detected and reported as the missing feature gate it is.
 - Changing the namespace scope (`Ctrl-n`) now restarts the inventory, metrics
   and event pollers, which were previously left bound to the old namespace.
 - `kube` 4.2 moved the rustls crypto provider behind a feature flag; without it
