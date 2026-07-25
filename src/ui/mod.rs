@@ -220,6 +220,16 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(" kscope ", accent),
             Span::styled(format!(":{} ", app.resource_label()), fg),
+            if app.problems_only {
+                Span::styled("problems ", Style::default().fg(theme.error()))
+            } else {
+                Span::raw("")
+            },
+            if app.selector_text.is_empty() {
+                Span::raw("")
+            } else {
+                Span::styled(format!("-l {} ", truncate(&app.selector_text, 20)), dim)
+            },
         ]),
         field("context", &app.context_name),
         field("k8s", &app.k8s_version),
@@ -288,6 +298,8 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
             bindings.push(("j/k", "move"));
             bindings.push(("Enter", "open"));
             bindings.push(("/", "filter list"));
+            bindings.push(("!", "problems only"));
+            bindings.push(("l", "label selector"));
             bindings.push(("Ctrl-n", "namespace"));
             bindings.push(("Ctrl-r", "refresh"));
         }
@@ -296,6 +308,7 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
             bindings.push(("Esc", "back to list"));
             match app.view {
                 View::Logs => {
+                    bindings.push(("v", "node service"));
                     bindings.push(("/", "search"));
                     bindings.push(("\\", "filter"));
                     bindings.push(("L/e", "level/errors"));

@@ -53,6 +53,7 @@ directories = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+http = "1"
 
 [dev-dependencies]
 pretty_assertions = "1"

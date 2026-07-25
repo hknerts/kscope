@@ -266,6 +266,7 @@ fn convert_pod(pod: Pod, now: chrono::DateTime<chrono::Utc>) -> (PodInfo, Vec<St
     }
 
     let info = PodInfo {
+        labels: meta.labels.unwrap_or_default(),
         namespace: meta.namespace.unwrap_or_default(),
         name: meta.name.unwrap_or_default(),
         node: spec.node_name.unwrap_or_default(),

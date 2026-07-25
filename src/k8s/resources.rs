@@ -129,8 +129,12 @@ pub struct ResourceRow {
     pub age_seconds: i64,
     /// Best-effort status, e.g. a pod's phase or a deployment's ready count.
     pub status: String,
-    /// True when `status` reads as a problem, so the table can colour it.
+    /// True when `status` reads as a problem, so the table can colour it and
+    /// the "problems only" filter can pick it out.
     pub unhealthy: bool,
+    /// The object's own pod selector, when it has one. Lets a Service (or a
+    /// CRD shaped like one) resolve to the pods whose logs it fronts.
+    pub selector: std::collections::BTreeMap<String, String>,
 }
 
 impl ResourceRow {
@@ -148,12 +152,19 @@ pub async fn list(
     client: &kube::Client,
     kind: &ResourceType,
     scope: &Scope,
+    selector: &str,
 ) -> Result<Vec<ResourceRow>> {
     let api: Api<DynamicObject> = match (kind.namespaced, scope) {
         (false, _) | (true, Scope::AllNamespaces) => Api::all_with(client.clone(), &kind.api),
         (true, Scope::Namespace(ns)) => Api::namespaced_with(client.clone(), ns, &kind.api),
     };
-    let list = api.list(&ListParams::default().limit(1000)).await?;
+    let mut lp = ListParams::default().limit(1000);
+    // Let the API server do the filtering when a selector is set — it is both
+    // cheaper and the only way to narrow a list capped at 1000 items.
+    if !selector.trim().is_empty() {
+        lp = lp.labels(selector.trim());
+    }
+    let list = api.list(&lp).await?;
     let now = chrono::Utc::now().timestamp();
 
     let mut rows: Vec<ResourceRow> = list.items.iter().map(|o| convert(o, now)).collect();
@@ -175,7 +186,26 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
         age_seconds,
         status,
         unhealthy,
+        selector: pod_selector(&obj.data),
     }
+}
+
+/// A Service's `spec.selector`, or a workload's `spec.selector.matchLabels`.
+/// Anything else yields an empty map, which selects nothing.
+fn pod_selector(data: &serde_json::Value) -> BTreeMap<String, String> {
+    let node = &data["spec"]["selector"];
+    let map = if node["matchLabels"].is_object() {
+        &node["matchLabels"]
+    } else {
+        node
+    };
+    map.as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A one-word health summary from whatever shape the object happens to have.
@@ -184,7 +214,44 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
 fn summarise(data: &serde_json::Value) -> (String, bool) {
     let status = &data["status"];
 
-    // Pods and PVCs: a phase is the whole story.
+    // Pods first, and not by phase: a pod whose container is stuck in
+    // CrashLoopBackOff still reports phase "Running", which is exactly the
+    // case triage needs to catch. The container states are the real story.
+    if let Some(containers) = status["containerStatuses"].as_array() {
+        if let Some(reason) = containers
+            .iter()
+            .filter_map(|c| {
+                c["state"]["waiting"]["reason"]
+                    .as_str()
+                    .or_else(|| c["state"]["terminated"]["reason"].as_str())
+            })
+            // "ContainerCreating" and "Completed" are not problems.
+            .find(|r| !matches!(*r, "ContainerCreating" | "PodInitializing" | "Completed"))
+        {
+            return (reason.to_string(), true);
+        }
+        let ready = containers.iter().filter(|c| c["ready"] == true).count();
+        let total = containers.len();
+        let restarts: i64 = containers
+            .iter()
+            .filter_map(|c| c["restartCount"].as_i64())
+            .sum();
+        let phase = status["phase"].as_str().unwrap_or("Unknown");
+        if ready < total {
+            return (format!("{ready}/{total} {phase}"), true);
+        }
+        // Healthy, but a restart count worth noticing is still surfaced.
+        if restarts > 0 {
+            return (format!("{phase} ↺{restarts}"), false);
+        }
+        return (
+            phase.to_string(),
+            phase != "Running" && phase != "Succeeded",
+        );
+    }
+
+    // Everything else with a phase: PVCs, namespaces, and pods that have no
+    // container statuses yet (Pending, unschedulable).
     if let Some(phase) = status["phase"].as_str() {
         let bad = !matches!(phase, "Running" | "Succeeded" | "Bound" | "Active");
         return (phase.to_string(), bad);
@@ -305,14 +372,83 @@ mod tests {
         assert!(resolve(&types, "nope").is_none());
     }
 
+    fn pod(containers: serde_json::Value, phase: &str) -> serde_json::Value {
+        json!({"status": {"phase": phase, "containerStatuses": containers}})
+    }
+
     #[test]
-    fn summarises_a_pod_phase() {
-        let (status, bad) = summarise(&json!({"status": {"phase": "Running"}}));
-        assert_eq!(status, "Running");
-        assert!(!bad);
-        let (status, bad) = summarise(&json!({"status": {"phase": "CrashLoopBackOff"}}));
-        assert_eq!(status, "CrashLoopBackOff");
-        assert!(bad);
+    fn a_crashlooping_pod_reports_the_reason_not_the_phase() {
+        // The whole point: phase is still "Running" here.
+        let obj = pod(
+            json!([{"ready": false, "restartCount": 7,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]),
+            "Running",
+        );
+        assert_eq!(summarise(&obj), ("CrashLoopBackOff".to_string(), true));
+    }
+
+    #[test]
+    fn transient_container_states_are_not_problems() {
+        let obj = pod(
+            json!([{"ready": false, "state": {"waiting": {"reason": "ContainerCreating"}}}]),
+            "Pending",
+        );
+        assert_eq!(summarise(&obj), ("0/1 Pending".to_string(), true));
+
+        let done = pod(
+            json!([{"ready": true, "state": {"terminated": {"reason": "Completed"}}}]),
+            "Succeeded",
+        );
+        assert_eq!(summarise(&done), ("Succeeded".to_string(), false));
+    }
+
+    #[test]
+    fn a_healthy_pod_still_surfaces_its_restart_count() {
+        let obj = pod(
+            json!([{"ready": true, "restartCount": 3, "state": {"running": {}}}]),
+            "Running",
+        );
+        assert_eq!(summarise(&obj), ("Running ↺3".to_string(), false));
+        let clean = pod(
+            json!([{"ready": true, "restartCount": 0, "state": {"running": {}}}]),
+            "Running",
+        );
+        assert_eq!(summarise(&clean), ("Running".to_string(), false));
+    }
+
+    #[test]
+    fn a_partially_ready_pod_is_unhealthy() {
+        let obj = pod(
+            json!([{"ready": true, "state": {"running": {}}},
+                   {"ready": false, "state": {"running": {}}}]),
+            "Running",
+        );
+        assert_eq!(summarise(&obj), ("1/2 Running".to_string(), true));
+    }
+
+    #[test]
+    fn summarises_a_phase_when_there_are_no_containers() {
+        assert_eq!(
+            summarise(&json!({"status": {"phase": "Bound"}})),
+            ("Bound".to_string(), false)
+        );
+        assert_eq!(
+            summarise(&json!({"status": {"phase": "Pending"}})),
+            ("Pending".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn extracts_service_and_workload_selectors() {
+        assert_eq!(
+            pod_selector(&json!({"spec": {"selector": {"app": "api"}}})),
+            [("app".to_string(), "api".to_string())].into()
+        );
+        assert_eq!(
+            pod_selector(&json!({"spec": {"selector": {"matchLabels": {"app": "api"}}}})),
+            [("app".to_string(), "api".to_string())].into()
+        );
+        assert!(pod_selector(&json!({"spec": {}})).is_empty());
     }
 
     #[test]

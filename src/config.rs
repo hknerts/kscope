@@ -73,6 +73,11 @@ pub struct LogsConfig {
     /// Searches are case-insensitive unless the query contains an upper-case
     /// character (smart case), when this is true.
     pub smart_case: bool,
+    /// Maximum number of container log streams open at once. Opening a
+    /// workload's logs attaches to every replica, so this is the guard that
+    /// stops a large DaemonSet from opening hundreds of watches against the
+    /// API server. Mirrors stern's `--max-log-requests`.
+    pub max_streams: usize,
 }
 
 impl Default for LogsConfig {
@@ -85,6 +90,7 @@ impl Default for LogsConfig {
             follow: true,
             wrap: false,
             smart_case: true,
+            max_streams: 50,
         }
     }
 }

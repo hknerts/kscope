@@ -22,6 +22,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Workload-level log streaming.** Opening a Deployment, StatefulSet,
+  DaemonSet, Job or ReplicaSet merges every replica into one timeline; a Service
+  or CRD resolves through its `spec.selector`; a Namespace or Node streams
+  everything running there. An object with no pods behind it says so rather than
+  silently attaching to nothing.
+- **Dynamic stream membership.** The pod set is re-derived on every inventory
+  refresh, so a rollout hands the stream over to the new pods instead of going
+  quiet on the old ones. Surviving streams are left untouched, so history is not
+  replayed on every tick.
+- `logs.max_streams` (default 50) caps concurrent log streams, so opening a
+  large DaemonSet cannot open hundreds of watches at once.
+- **Triage filter** `!`: narrow any listing to the objects in trouble. Pod
+  status now reads container state rather than phase, so a pod stuck in
+  `CrashLoopBackOff` or `ImagePullBackOff` is reported as such instead of as
+  `Running`.
+- **Label selectors**: `-l`/`--selector` and the `l` key. Applied server-side to
+  listings and used to narrow which pods a workload's logs come from. Supports
+  `k=v`, `k==v`, `k!=v`, `k` and `!k`.
+- **Node journals**: opening a Node shows its kubelet logs, with `v` cycling
+  kubelet / containerd / kernel. Needs `nodes/proxy` and the `NodeLogQuery`
+  feature gate; when either is missing the error says which.
 - **`:` resource palette** with k9s-style autocompletion. Candidates come from
   the cluster's discovery API, so CRDs complete like built-in kinds, and
   kubectl short names (`po`, `deploy`, `pvc`, …), singular kinds and fuzzy input

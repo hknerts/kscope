@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
         scope,
         context_name,
         user_name,
+        cli.selector.clone().unwrap_or_default(),
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -203,6 +204,7 @@ async fn run(
     scope: Scope,
     context_name: String,
     user_name: String,
+    selector: String,
 ) -> Result<()> {
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1024);
     let (inv_tx, mut inv_rx) = tokio::sync::mpsc::channel(16);
@@ -212,6 +214,9 @@ async fn run(
     // get their own channel and a task spawned per refresh.
     let (row_tx, mut row_rx) = tokio::sync::mpsc::channel::<Result<Vec<ResourceRow>, String>>(8);
     let (type_tx, mut type_rx) = tokio::sync::mpsc::channel::<Vec<ResourceType>>(4);
+    // Node journals are a one-shot fetch rather than a stream.
+    type NodeLogs = (String, &'static str, Result<String, String>);
+    let (node_tx, mut node_rx) = tokio::sync::mpsc::channel::<NodeLogs>(4);
 
     let frame_budget = Duration::from_millis(1000 / config.general.max_fps.max(1) as u64);
 
@@ -241,6 +246,9 @@ async fn run(
         contexts,
     );
 
+    if !selector.is_empty() {
+        app.set_selector(&selector);
+    }
     spawn_discovery(&app.client, type_tx.clone());
 
     // Draw once immediately so the user sees the shell before the first poll.
@@ -267,6 +275,9 @@ async fn run(
             Some(rows) = row_rx.recv() => {
                 listing = false;
                 app.on_rows(rows);
+            }
+            Some((node, service, result)) = node_rx.recv() => {
+                app.on_node_logs(node, service, result);
             }
             _ = ticker.tick() => {}
             _ = tokio::signal::ctrl_c() => app.should_quit = true,
@@ -315,6 +326,20 @@ async fn run(
             );
         }
 
+        // Service a pending node journal request.
+        if let Some((node, service)) = app.take_node_log_request() {
+            let client = app.client.clone();
+            let tail = app.config.logs.tail_lines;
+            let tx = node_tx.clone();
+            tokio::spawn(async move {
+                let result =
+                    k8s::node_logs::fetch(&client, &node, service, Some(tail).filter(|t| *t > 0))
+                        .await
+                        .map_err(|e| format!("{service} logs from {node}: {e}"));
+                let _ = tx.send((node, service, result)).await;
+            });
+        }
+
         // Service a pending list request. Guarded so holding `Ctrl-r` cannot
         // pile up overlapping requests against the API server.
         if app.loading && !listing {
@@ -322,9 +347,10 @@ async fn run(
                 listing = true;
                 let client = app.client.clone();
                 let scope = app.scope.clone();
+                let selector = app.selector_text.clone();
                 let tx = row_tx.clone();
                 tokio::spawn(async move {
-                    let result = k8s::resources::list(&client, &kind, &scope)
+                    let result = k8s::resources::list(&client, &kind, &scope, &selector)
                         .await
                         .map_err(|e| format!("listing {}: {e}", kind.name()));
                     let _ = tx.send(result).await;
