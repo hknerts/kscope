@@ -57,57 +57,23 @@ one screen:
 
 ## kscope or k9s?
 
-[k9s](https://github.com/derailed/k9s) is excellent, and kscope is not trying to
-replace it. They are built for different halves of the job.
+[k9s](https://github.com/derailed/k9s) is a cockpit: you go there to *act* —
+scale, delete, edit, port-forward, exec. kscope is an instrument panel: you go
+there to *understand*. It is not a replacement, and plenty of teams want both.
 
-**k9s is a cockpit.** You go there to *act*: scale a Deployment, delete a stuck
-pod, edit a ConfigMap, port-forward, shell into a container. It has a plugin
-system, skins, benchmarking and an ecosystem.
+The difference you feel day to day is **who you can hand it to**. k9s's
+`--readonly` is a runtime flag — the capability is still compiled in and the flag
+can be dropped. kscope has no mutating code at all: point it at a cluster with an
+admin kubeconfig and it still cannot scale, delete, patch or exec, because none
+of those calls exist in the binary.
 
-**kscope is an instrument panel.** You go there to *understand*: what is this
-workload printing, what is it consuming, and what has the cluster been saying
-about it. Nothing more — and that constraint is what it trades for.
-
-| | kscope | k9s |
-| --- | --- | --- |
-| Mutating actions | **not implemented** — no write code path exists | full lifecycle, plus `exec` and port-forward; `--readonly` opts out |
-| Log history | entire retained history on attach, **unbounded** buffer by default | configurable tail and buffer |
-| Log investigation | regex search with match highlighting, include/exclude filters, severity classification, level threshold, errors-only, export to file | search and filter |
-| Metrics | node **and** pod **and** container at once, versus requests *and* limits, with rolling sparklines | CPU/MEM columns, cluster pulse |
-| Events | scoped to the object you have open, warnings isolable with one key | via `describe` / the events view |
-| Scope | logs, metrics, events | the whole cluster surface |
-
-### Why that matters for observation
-
-The difference people actually feel is **who you can hand it to**.
-
-k9s's read-only mode is a runtime flag. It protects a careless keystroke, but the
-capability is still compiled in and the flag can be dropped — so handing k9s to a
-wider audience is a decision you make about *trust*, backed by RBAC you have to
-get right.
-
-kscope has no mutating code at all. Point it at a cluster with a full admin
-kubeconfig and it still cannot scale, delete, patch or exec, because none of
-those calls exist in the binary. Every request it makes is a `get`, `list` or
-`watch`. That gives you defence in depth rather than a single RBAC layer, and it
-makes the tool cheap to distribute:
-
-* **On-call and junior engineers** can dig through logs, container memory trends
-  and events on production without anyone auditing what else the token permits.
-* **Contractors, support and auditors** get a real diagnostic view without a path
-  to change anything.
-* **Incident calls** stop bottlenecking on the two people who hold write access
-  just to read logs.
-
-The practical effect is that looking becomes cheap, so it happens earlier. A
-container creeping toward its memory limit, restart counts climbing on one
-replica, a `FailedScheduling` event repeating — these are visible in kscope
-before they become an outage, to anyone who can be given a view-only token.
-kscope will not prevent a bad deploy; it shortens the gap between something going
-wrong and somebody noticing.
-
-Plenty of teams will want both: kscope open on the dashboard everyone watches,
-k9s in the hands of whoever is authorised to fix what it finds.
+So it costs nothing to give away. On-call, juniors, contractors and auditors can
+all dig through production logs, container memory trends and events without
+anyone vetting what else their token permits — which means looking happens
+earlier. A container creeping toward its memory limit, restarts climbing on one
+replica, a repeating `FailedScheduling`: visible before they become an outage.
+kscope will not stop a bad deploy; it shortens the gap between something breaking
+and somebody noticing.
 
 ## Install
 
