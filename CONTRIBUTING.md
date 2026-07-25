@@ -13,7 +13,7 @@ table.
 ## Getting started
 
 ```sh
-git clone https://github.com/kscope-tui/kscope
+git clone https://github.com/hknerts/kscope
 cd kscope
 cargo test              # unit tests, no cluster required
 cargo run               # needs a reachable cluster
