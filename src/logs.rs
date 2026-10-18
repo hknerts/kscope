@@ -142,15 +142,11 @@ pub fn classify(raw: &str) -> Level {
             return Level::Warn;
         }
     }
-    for token in [b"debug".as_ref()] {
-        if has_token(head, token) {
-            return Level::Debug;
-        }
+    if has_token(head, b"debug") {
+        return Level::Debug;
     }
-    for token in [b"trace".as_ref()] {
-        if has_token(head, token) {
-            return Level::Trace;
-        }
+    if has_token(head, b"trace") {
+        return Level::Trace;
     }
     Level::Info
 }
