@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-18
+
+### Security
+
+- Update `rustls` to 0.23.46 and `rustls-webpki` to 0.103.15 for
+  RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0348 and
+  RUSTSEC-2026-0349. Every connection kscope makes to the API server goes
+  through rustls; 1.1.0 binaries were built with the affected version, so
+  upgrade.
+
 ## [1.1.0] - 2026-10-18
 
 ### Security
@@ -139,6 +149,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Non-interactive `--dump` mode for scripts.
 - Configuration file with theme and highlight customisation.
 
-[Unreleased]: https://github.com/hknerts/kscope/compare/1.1.0...HEAD
+[Unreleased]: https://github.com/hknerts/kscope/compare/1.1.1...HEAD
+[1.1.1]: https://github.com/hknerts/kscope/releases/tag/1.1.1
 [1.1.0]: https://github.com/hknerts/kscope/releases/tag/1.1.0
 [0.1.0]: https://github.com/hknerts/kscope/releases/tag/v0.1.0
