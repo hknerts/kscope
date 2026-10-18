@@ -2,7 +2,8 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Both "v1.2.3" and bare "1.2.3" — the project tags without the prefix.
+    tags: ["v*", "[0-9]*"]
   workflow_dispatch:
 
 permissions:
