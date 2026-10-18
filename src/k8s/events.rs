@@ -4,14 +4,20 @@
 //! churn far faster than the pod inventory, and a namespace-scoped token that
 //! cannot list them must not take the rest of the inventory down with it.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use k8s_openapi::api::core::v1::Event;
-use kube::api::{Api, ListParams};
+use kube::api::Api;
+use kube::runtime::reflector;
+use kube::runtime::watcher::{self, watcher};
+use kube::runtime::WatchStreamExt;
+use kube::ResourceExt;
 use tokio::sync::mpsc::Sender;
 
 use super::discovery::Scope;
+use super::watch::{drive, Flags};
 
 /// One cluster event, flattened for display.
 #[derive(Debug, Clone, Default)]
@@ -52,11 +58,20 @@ impl EventInfo {
     /// "kind/name" matches only that object. `selector` is lowercased here so
     /// callers can pass raw user input.
     pub fn matches_resource(&self, selector: &str) -> bool {
-        let selector = selector.trim().to_ascii_lowercase();
+        // Called for every event on every cursor move, so no allocation.
+        let selector = selector.trim();
         if selector.is_empty() {
             return true;
         }
-        self.resource() == selector || self.kind.to_ascii_lowercase() == selector
+        if self.kind.is_empty() {
+            return self.name.eq_ignore_ascii_case(selector);
+        }
+        match selector.split_once('/') {
+            Some((kind, name)) => {
+                self.kind.eq_ignore_ascii_case(kind) && self.name.eq_ignore_ascii_case(name)
+            }
+            None => self.kind.eq_ignore_ascii_case(selector),
+        }
     }
 }
 
@@ -68,79 +83,126 @@ pub enum EventUpdate {
     Unavailable(String),
 }
 
-/// Spawn the event loop. It keeps running until the channel is closed.
+/// Spawn the event watch. It keeps running until the channel is closed or the
+/// handle is aborted.
+///
+/// Events are watched rather than re-listed: they are the fastest-churning
+/// kind in any cluster, so a periodic LIST of up to thousands of them was
+/// mostly re-downloading what kscope already had. `heartbeat` is how often the
+/// list is re-sent when nothing changed, so ages keep moving.
 pub fn spawn(
     client: kube::Client,
     scope: Scope,
-    interval: Duration,
+    heartbeat: Duration,
     tx: Sender<EventUpdate>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            ticker.tick().await;
-            let update = match collect(&client, &scope).await {
-                Ok(events) => EventUpdate::Events(events),
-                Err(err) => EventUpdate::Unavailable(format!("events: {err}")),
-            };
-            if tx.send(update).await.is_err() {
-                return;
+        let api: Api<Event> = match &scope {
+            Scope::AllNamespaces => Api::all(client),
+            Scope::Namespace(ns) => Api::namespaced(client, ns),
+        };
+        let (store, writer) = reflector::store::<Event>();
+        let flags = Flags::default();
+        let changed = Arc::new(AtomicBool::new(true));
+
+        let err_tx = tx.clone();
+        let mut last_error = String::new();
+        let watch = drive(
+            writer,
+            watcher(api, watcher::Config::default()).modify(|e| {
+                e.managed_fields_mut().clear();
+            }),
+            flags.clone(),
+            changed.clone(),
+            move |err: String| {
+                // Usually RBAC; say it once, not on every retry.
+                if err != last_error {
+                    last_error = err.clone();
+                    let _ = err_tx.try_send(EventUpdate::Unavailable(format!("events: {err}")));
+                }
+            },
+        );
+
+        let publish = async {
+            let mut last_sent: Option<Instant> = None;
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if !flags.is_ready() {
+                    continue;
+                }
+                let due = last_sent.is_none_or(|t| t.elapsed() >= heartbeat);
+                if !changed.swap(false, Ordering::AcqRel) && !due {
+                    continue;
+                }
+                let events = collect(&store.state());
+                if tx.send(EventUpdate::Events(events)).await.is_err() {
+                    return;
+                }
+                last_sent = Some(Instant::now());
             }
+        };
+
+        tokio::select! {
+            _ = publish => {}
+            _ = watch => {}
         }
     })
 }
 
-/// One event pass, newest first.
-pub async fn collect(client: &kube::Client, scope: &Scope) -> Result<Vec<EventInfo>> {
-    let api: Api<Event> = match scope {
-        Scope::AllNamespaces => Api::all(client.clone()),
-        Scope::Namespace(ns) => Api::namespaced(client.clone(), ns),
-    };
-    let list = api.list(&ListParams::default().limit(2000)).await?;
+/// Flatten the cached events, newest first.
+pub fn collect(objects: &[Arc<Event>]) -> Vec<EventInfo> {
     let now = chrono::Utc::now().timestamp();
-
-    let mut events: Vec<EventInfo> = list.items.into_iter().map(|e| convert(e, now)).collect();
+    let mut events: Vec<EventInfo> = objects.iter().map(|e| convert(e, now)).collect();
     // Most recent first: that is the only order anyone reads events in.
     events.sort_by_key(|e| e.age_seconds);
-    Ok(events)
+    events
 }
 
-fn convert(event: Event, now: i64) -> EventInfo {
-    let obj = event.involved_object;
+fn convert(event: &Event, now: i64) -> EventInfo {
+    let obj = &event.involved_object;
 
     // `last_timestamp` is the classic field; the newer `event_time` is all a
     // series-style event carries, so fall back through both before giving up
     // and using the object's own creation time.
     let last_seen = event
         .last_timestamp
+        .as_ref()
         .map(|t| t.0.as_second())
-        .or_else(|| event.event_time.map(|t| t.0.as_second()))
-        .or_else(|| event.first_timestamp.map(|t| t.0.as_second()))
-        .or_else(|| event.metadata.creation_timestamp.map(|t| t.0.as_second()));
+        .or_else(|| event.event_time.as_ref().map(|t| t.0.as_second()))
+        .or_else(|| event.first_timestamp.as_ref().map(|t| t.0.as_second()))
+        .or_else(|| {
+            event
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.as_second())
+        });
 
     let source = event
         .source
-        .and_then(|s| s.component)
-        .or(event.reporting_component)
+        .as_ref()
+        .and_then(|s| s.component.clone())
+        .or_else(|| event.reporting_component.clone())
         .unwrap_or_default();
 
     EventInfo {
         namespace: obj
             .namespace
-            .or(event.metadata.namespace)
+            .clone()
+            .or_else(|| event.metadata.namespace.clone())
             .unwrap_or_default(),
-        kind: obj.kind.unwrap_or_default(),
-        name: obj.name.unwrap_or_default(),
-        reason: event.reason.unwrap_or_default(),
+        kind: obj.kind.clone().unwrap_or_default(),
+        name: obj.name.clone().unwrap_or_default(),
+        reason: event.reason.clone().unwrap_or_default(),
         // Events routinely carry embedded newlines; the table wants one line.
         message: event
             .message
+            .as_deref()
             .unwrap_or_default()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" "),
-        type_: event.type_.unwrap_or_else(|| "Normal".into()),
+        type_: event.type_.clone().unwrap_or_else(|| "Normal".into()),
         count: event.count.unwrap_or(1).max(1),
         age_seconds: last_seen.map(|t| (now - t).max(0)).unwrap_or(0),
         source,

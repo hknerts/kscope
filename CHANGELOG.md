@@ -6,6 +6,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-18
+
+### Security
+
+- **Secret values are redacted in describe.** `d` on a Secret shows each key
+  as `<redacted, N bytes>` instead of its base64 value, for both `data` and
+  `stringData`. Opt back in with `describe.show_secret_values = true`.
+
+### Performance
+
+- The inventory (pods, ReplicaSets, nodes, namespaces, PVCs) and events are
+  **watched** instead of re-listed every few seconds. The API server sees one
+  paginated LIST per kind and then only changes; the UI sees changes within
+  ~250 ms instead of up to a full refresh interval.
+- Discovery uses the aggregated discovery API (2 requests instead of one per
+  API group, sequentially), with a fallback for clusters older than 1.26.
+- Startup and context switches no longer block the UI on the apiserver version
+  probe or on building the new client.
+- The UI no longer wakes 30 times a second while idle; frames are scheduled
+  only when something changed.
+- An active search no longer rescans the whole buffer on every log batch, the
+  buffer's memory figure is a counter instead of a per-frame walk, and the
+  resource, events and describe views build only the rows on screen.
+
+### Fixed
+
+- A log stream that reconnected re-downloaded the container's entire history
+  into the buffer, duplicating it. For a finished container this happened
+  every 500 ms, forever. Streams now resume from the last delivered line.
+- Log lines arriving faster than one per 100 ms were held back until 512 had
+  piled up, which could delay a moderately chatty pod by tens of seconds.
+- A line with invalid UTF-8 tore the log stream down (and triggered the replay
+  above); it is now decoded lossily.
+- The browsed resource list never refreshed after the first listing; it is now
+  kept live while browsing, and paged past the old 1000-item cap.
+- A listing that finished after the resource type was changed overwrote the
+  new list and left it stuck.
+
 ### Changed
 
 - **Detail views are switched by letter, not number**: `Enter` or `l` for logs,
@@ -101,5 +139,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Non-interactive `--dump` mode for scripts.
 - Configuration file with theme and highlight customisation.
 
-[Unreleased]: https://github.com/hknerts/kscope/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hknerts/kscope/compare/1.1.0...HEAD
+[1.1.0]: https://github.com/hknerts/kscope/releases/tag/1.1.0
 [0.1.0]: https://github.com/hknerts/kscope/releases/tag/v0.1.0

@@ -13,8 +13,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{AsyncBufReadExt, TryStreamExt};
+use futures::AsyncBufReadExt;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::jiff::Timestamp;
 use kube::api::{Api, LogParams};
 use tokio::sync::mpsc::Sender;
 
@@ -65,6 +66,12 @@ pub enum LogEvent {
 }
 
 /// Spawn a follower task. Drop/abort the returned handle to detach.
+///
+/// Reconnects never replay history. The API server is always asked for
+/// timestamps, so the task knows exactly which line it saw last: a reconnect
+/// resumes from there with `sinceTime` and skips anything at or before it. The
+/// prefix is stripped again before the line leaves the task unless the user
+/// asked to see timestamps.
 pub fn spawn(
     client: kube::Client,
     spec: StreamSpec,
@@ -74,42 +81,52 @@ pub fn spawn(
         let source = spec.source();
         let api: Api<Pod> = Api::namespaced(client, &spec.namespace);
         let mut backoff = Duration::from_millis(500);
+        let mut cursor = Cursor::default();
 
         loop {
+            // The first attach honours tail/since as configured; a resume
+            // only wants what came after the last line already delivered.
             let params = LogParams {
                 container: spec.container.clone(),
                 follow: true,
-                tail_lines: spec.tail,
-                since_seconds: spec.since_seconds,
-                timestamps: spec.timestamps,
+                tail_lines: if cursor.last.is_some() {
+                    None
+                } else {
+                    spec.tail
+                },
+                since_seconds: if cursor.last.is_some() {
+                    None
+                } else {
+                    spec.since_seconds
+                },
+                since_time: cursor.last,
+                timestamps: true,
                 previous: spec.previous,
                 ..Default::default()
             };
 
             match api.log_stream(&spec.pod, &params).await {
                 Ok(stream) => {
-                    backoff = Duration::from_millis(500);
                     if tx.send(LogEvent::Attached(source.clone())).await.is_err() {
                         return;
                     }
-                    match pump(stream, &source, &tx).await {
-                        Ok(()) => {
-                            if tx.send(LogEvent::Ended(source.clone())).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(err) => {
-                            if tx
-                                .send(LogEvent::Failed {
-                                    source: source.clone(),
-                                    error: err,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                    let before = cursor.delivered;
+                    let outcome = pump(stream, &source, &tx, &mut cursor, spec.timestamps).await;
+                    // Only a stream that actually delivered something earns a
+                    // fast retry. A terminated container ends its stream
+                    // immediately, and must not be re-polled twice a second.
+                    if cursor.delivered > before {
+                        backoff = Duration::from_millis(500);
+                    }
+                    let event = match outcome {
+                        Ok(()) => LogEvent::Ended(source.clone()),
+                        Err(error) => LogEvent::Failed {
+                            source: source.clone(),
+                            error,
+                        },
+                    };
+                    if tx.send(event).await.is_err() {
+                        return;
                     }
                 }
                 Err(err) => {
@@ -134,35 +151,122 @@ pub fn spawn(
     })
 }
 
-async fn pump<S>(stream: S, source: &Arc<str>, tx: &Sender<LogEvent>) -> Result<(), String>
+/// Where a stream got to, so a reconnect can pick up without duplicates.
+#[derive(Debug, Default)]
+struct Cursor {
+    /// Timestamp of the newest line delivered.
+    last: Option<Timestamp>,
+    /// Lines delivered over the task's lifetime.
+    delivered: u64,
+}
+
+impl Cursor {
+    /// Decide what to do with one raw, timestamp-prefixed line: `None` when it
+    /// was already delivered before a reconnect, otherwise the text to show.
+    fn accept(&mut self, raw: String, keep_timestamp: bool) -> Option<String> {
+        let (stamp, body_at) = match raw.split_once(' ') {
+            Some((head, _)) => match head.parse::<Timestamp>() {
+                Ok(ts) => (Some(ts), head.len() + 1),
+                Err(_) => (None, 0),
+            },
+            None => match raw.parse::<Timestamp>() {
+                // A blank line still carries its timestamp.
+                Ok(ts) => (Some(ts), raw.len()),
+                Err(_) => (None, 0),
+            },
+        };
+        if let Some(ts) = stamp {
+            if self.last.is_some_and(|last| ts <= last) {
+                return None;
+            }
+            self.last = Some(ts);
+        }
+        self.delivered += 1;
+        if keep_timestamp || body_at == 0 {
+            Some(raw)
+        } else {
+            Some(raw[body_at.min(raw.len())..].to_string())
+        }
+    }
+}
+
+/// Read lines and forward them in batches.
+///
+/// A batch is flushed when it is full or [`BATCH_INTERVAL`] after its *first*
+/// line arrived — not after the stream goes quiet, which would hold a steady
+/// trickle of lines back until 512 had piled up.
+async fn pump<S>(
+    stream: S,
+    source: &Arc<str>,
+    tx: &Sender<LogEvent>,
+    cursor: &mut Cursor,
+    keep_timestamp: bool,
+) -> Result<(), String>
 where
     S: futures::AsyncBufRead + Unpin,
 {
-    let mut lines = stream.lines();
+    let mut reader = stream;
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
     let mut batch: Vec<String> = Vec::with_capacity(BATCH_MAX);
+    let deadline = tokio::time::sleep(BATCH_INTERVAL);
+    tokio::pin!(deadline);
 
     loop {
-        match tokio::time::timeout(BATCH_INTERVAL, lines.try_next()).await {
-            Ok(Ok(Some(line))) => {
-                batch.push(line);
-                if batch.len() >= BATCH_MAX {
+        tokio::select! {
+            biased;
+
+            // `read_until` keeps whatever it already consumed in `buf`, so
+            // losing this race to the deadline never drops part of a line.
+            read = reader.read_until(b'\n', &mut buf) => match read {
+                Ok(0) => {
+                    if !buf.is_empty() {
+                        take_line(&mut buf, &mut batch, cursor, keep_timestamp);
+                    }
                     flush(&mut batch, source, tx).await?;
+                    return Ok(());
                 }
-            }
-            Ok(Ok(None)) => {
-                flush(&mut batch, source, tx).await?;
-                return Ok(());
-            }
-            Ok(Err(err)) => {
-                flush(&mut batch, source, tx).await?;
-                return Err(err.to_string());
-            }
-            Err(_timeout) => {
-                if !batch.is_empty() {
+                Ok(_) => {
+                    if buf.last() != Some(&b'\n') {
+                        // Partial line at end of stream; the next read
+                        // returns 0 and finishes it.
+                        continue;
+                    }
+                    let was_empty = batch.is_empty();
+                    take_line(&mut buf, &mut batch, cursor, keep_timestamp);
+                    if was_empty && !batch.is_empty() {
+                        deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + BATCH_INTERVAL);
+                    }
+                    if batch.len() >= BATCH_MAX {
+                        flush(&mut batch, source, tx).await?;
+                    }
+                }
+                Err(err) => {
                     flush(&mut batch, source, tx).await?;
+                    return Err(err.to_string());
                 }
+            },
+            _ = &mut deadline, if !batch.is_empty() => {
+                flush(&mut batch, source, tx).await?;
             }
         }
+    }
+}
+
+/// Turn the bytes in `buf` into a line on `batch`. Invalid UTF-8 is replaced
+/// rather than treated as an error: one binary byte in a container's output
+/// must not tear the stream down.
+fn take_line(buf: &mut Vec<u8>, batch: &mut Vec<String>, cursor: &mut Cursor, keep: bool) {
+    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+        buf.pop();
+    }
+    let raw = match String::from_utf8(std::mem::take(buf)) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+    };
+    if let Some(line) = cursor.accept(raw, keep) {
+        batch.push(line);
     }
 }
 
@@ -214,5 +318,84 @@ mod tests {
             previous: false,
         };
         assert_eq!(&*spec.source(), "prod/api-0:app");
+    }
+
+    #[test]
+    fn a_resume_skips_lines_already_delivered() {
+        let mut cursor = Cursor::default();
+        let a = "2024-05-01T10:00:00.100000000Z first".to_string();
+        let b = "2024-05-01T10:00:00.200000000Z second".to_string();
+        assert_eq!(cursor.accept(a.clone(), false).as_deref(), Some("first"));
+        assert_eq!(cursor.accept(b.clone(), false).as_deref(), Some("second"));
+        // A reconnect with sinceTime replays from the start of that second.
+        assert_eq!(cursor.accept(a, false), None);
+        assert_eq!(cursor.accept(b, false), None);
+        let c = "2024-05-01T10:00:01Z third".to_string();
+        assert_eq!(cursor.accept(c.clone(), true), Some(c));
+        assert_eq!(cursor.delivered, 3);
+    }
+
+    #[test]
+    fn lines_without_a_timestamp_pass_through() {
+        let mut cursor = Cursor::default();
+        assert_eq!(
+            cursor.accept("plain".into(), false).as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            cursor
+                .accept("2024-05-01T10:00:00Z".into(), false)
+                .as_deref(),
+            Some("")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trickle_is_flushed_on_time_not_when_the_batch_fills() {
+        // Lines arriving every 30 ms never let a per-line timeout expire; the
+        // batch must still go out about 100 ms after its first line.
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let source: Arc<str> = Arc::from("ns/pod:c");
+        let task = tokio::spawn(async move {
+            let reader = tokio_util_compat(reader);
+            let mut cursor = Cursor::default();
+            pump(reader, &source, &tx, &mut cursor, false).await
+        });
+        let started = std::time::Instant::now();
+        let writer_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            for i in 0..40 {
+                let line = format!("2024-05-01T10:00:{:02}.000000001Z line {i}\n", i);
+                writer.write_all(line.as_bytes()).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        });
+        let Some(LogEvent::Batch { lines, .. }) = rx.recv().await else {
+            panic!("expected a batch");
+        };
+        assert!(started.elapsed() < Duration::from_millis(400));
+        assert!(!lines.is_empty() && lines.len() < 40);
+        assert_eq!(lines[0], "line 0");
+        writer_task.abort();
+        task.abort();
+    }
+
+    /// Minimal tokio → futures `AsyncBufRead` adapter for the test above.
+    fn tokio_util_compat(reader: tokio::io::DuplexStream) -> impl futures::AsyncBufRead + Unpin {
+        use futures::StreamExt;
+        let stream = futures::stream::unfold(reader, |mut r| async move {
+            use tokio::io::AsyncReadExt;
+            let mut chunk = vec![0u8; 512];
+            match r.read(&mut chunk).await {
+                Ok(0) | Err(_) => None,
+                Ok(n) => {
+                    chunk.truncate(n);
+                    Some((Ok::<_, std::io::Error>(chunk), r))
+                }
+            }
+        })
+        .boxed();
+        futures::TryStreamExt::into_async_read(stream)
     }
 }

@@ -16,6 +16,7 @@ pub struct Config {
     pub general: General,
     pub logs: LogsConfig,
     pub metrics: MetricsConfig,
+    pub describe: DescribeConfig,
     pub theme: Theme,
     /// Extra user-defined regex highlight rules, applied after the built-ins.
     pub highlight: Vec<HighlightRule>,
@@ -28,11 +29,12 @@ pub struct General {
     pub max_fps: u16,
     /// Namespace selected on start-up. `None` means "use kubeconfig default".
     pub namespace: Option<String>,
-    /// Refresh interval for the pod/node inventory, in milliseconds.
+    /// The inventory (pods, nodes, PVCs, namespaces) is watched, so changes
+    /// arrive within a fraction of a second regardless of this value. It sets
+    /// how often a snapshot is re-sent when nothing changed (so ages move) and
+    /// how often the browsed resource list is re-listed. Milliseconds.
     pub inventory_refresh_ms: u64,
-    /// Refresh interval for cluster events, in milliseconds. Slower than the
-    /// inventory by default: events are cheap to read but rarely worth
-    /// re-listing more than a couple of times a minute.
+    /// Events are watched too; this is their idle heartbeat, in milliseconds.
     pub events_refresh_ms: u64,
     /// Mouse support (scroll wheel + click to select).
     pub mouse: bool,
@@ -223,6 +225,16 @@ pub struct HighlightRule {
 
 fn default_rule_fg() -> String {
     "magenta".into()
+}
+
+/// The describe overlay.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DescribeConfig {
+    /// Show the values of Secrets instead of `<redacted, N bytes>`. Off by
+    /// default so kscope stays safe to hand to people who should not read
+    /// credentials, even when it runs with a token that could.
+    pub show_secret_values: bool,
 }
 
 impl Config {

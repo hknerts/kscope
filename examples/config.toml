@@ -8,8 +8,14 @@
 max_fps = 30
 # Namespace used on start-up. Omit to follow the kubeconfig context.
 # namespace = "payments"
+# Pods, nodes and events are watched, so changes show up immediately; this
+# is how often the browsed list is re-listed and idle snapshots re-sent.
 inventory_refresh_ms = 5000
 mouse = true
+
+[describe]
+# Secret values are shown as "<redacted, N bytes>". Set to true to see them.
+show_secret_values = false
 
 [logs]
 # Lines kept in memory. 0 (the default) means unlimited: nothing is ever

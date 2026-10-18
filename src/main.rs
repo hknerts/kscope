@@ -211,8 +211,17 @@ async fn run(
     let (met_tx, mut met_rx) = tokio::sync::mpsc::channel(16);
     let (evt_tx, mut evt_rx) = tokio::sync::mpsc::channel(16);
     // Resource listings are one-shot requests rather than a poller, so they
-    // get their own channel and a task spawned per refresh.
-    let (row_tx, mut row_rx) = tokio::sync::mpsc::channel::<Result<Vec<ResourceRow>, String>>(8);
+    // get their own channel and a task spawned per refresh. Each result is
+    // tagged with what was asked for, so an answer that arrives after the user
+    // has moved on to another kind is recognised and dropped.
+    type Rows = (String, Result<Vec<ResourceRow>, String>);
+    let (row_tx, mut row_rx) = tokio::sync::mpsc::channel::<Rows>(8);
+    // Header details and context switches are network round trips (a context
+    // switch may even run an exec credential plugin), so neither is awaited
+    // on the UI loop.
+    let (ver_tx, mut ver_rx) = tokio::sync::mpsc::channel::<(String, String)>(2);
+    type Switched = Result<(kube::Client, String, String, String), (String, String)>;
+    let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::channel::<Switched>(2);
     let (type_tx, mut type_rx) = tokio::sync::mpsc::channel::<Vec<ResourceType>>(4);
     // Node journals are a one-shot fetch rather than a stream.
     type NodeLogs = (String, &'static str, Result<String, String>);
@@ -235,7 +244,7 @@ async fn run(
         evt_tx.clone(),
     );
 
-    let k8s_version = k8s::server_version(&client).await;
+    spawn_version(&client, &context_name, ver_tx.clone());
     let contexts = k8s::resources::contexts()
         .into_iter()
         .map(|(name, cluster)| ContextEntry { name, cluster })
@@ -248,7 +257,7 @@ async fn run(
         log_tx,
         context_name,
         user_name,
-        k8s_version,
+        "…".to_string(),
         contexts,
     );
 
@@ -260,12 +269,20 @@ async fn run(
     // Draw once immediately so the user sees the shell before the first poll.
     terminal.draw(|f| ui::draw(f, &mut app))?;
     let mut last_draw = Instant::now();
-    let mut ticker = tokio::time::interval(frame_budget);
+    // Housekeeping only (list refresh, PVC usage polling). Frames are not
+    // driven by a ticker: an idle kscope does not wake up 30 times a second.
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
     // `loading` is edge-triggered: the app raises it, we service it once.
-    let mut listing = false;
+    // `listing` holds the request in flight, if any.
+    let mut listing: Option<String> = None;
+    let mut last_listed = Instant::now();
+    let list_refresh = Duration::from_millis(app.config.general.inventory_refresh_ms.max(1000));
 
     loop {
+        let next_frame = tokio::time::Instant::from_std(last_draw + frame_budget);
         tokio::select! {
             biased;
 
@@ -278,30 +295,27 @@ async fn run(
                 app.on_resource_types(types);
                 app.request_rows();
             }
-            Some(rows) = row_rx.recv() => {
-                listing = false;
-                app.on_rows(rows);
+            Some((key, rows)) = row_rx.recv() => {
+                listing = None;
+                last_listed = Instant::now();
+                if Some(key) == list_key(&app) {
+                    app.on_rows(rows);
+                } else {
+                    // Stale: the kind, scope or selector changed meanwhile.
+                    app.request_rows();
+                }
             }
-            Some((node, service, result)) = node_rx.recv() => {
-                app.on_node_logs(node, service, result);
+            Some((context, version)) = ver_rx.recv() => {
+                // A probe of the cluster just switched away from is stale.
+                if context == app.context_name {
+                    app.k8s_version = version;
+                    app.dirty = true;
+                }
             }
-            Some(result) = desc_rx.recv() => app.on_describe(result),
-            Some(result) = vol_rx.recv() => app.on_volume_usage(result),
-            _ = ticker.tick() => {}
-            _ = tokio::signal::ctrl_c() => app.should_quit = true,
-        }
-
-        if app.should_quit {
-            break;
-        }
-
-        // A context switch rebuilds the client and everything hanging off it.
-        if let Some(context) = app.pending_context.take() {
-            match k8s::connect(Some(&context)).await {
+            Some(switched) = ctx_rx.recv() => match switched {
                 Ok((new_client, default_ns, new_context, new_user)) => {
                     pollers.abort();
                     let new_scope = Scope::Namespace(default_ns);
-                    let version = k8s::server_version(&new_client).await;
                     pollers = Pollers::spawn(
                         &new_client,
                         &new_scope,
@@ -311,14 +325,39 @@ async fn run(
                         evt_tx.clone(),
                     );
                     spawn_discovery(&new_client, type_tx.clone());
-                    app.adopt_context(new_client, new_scope, new_context, new_user, version);
-                    listing = false;
+                    spawn_version(&new_client, &new_context, ver_tx.clone());
+                    app.adopt_context(new_client, new_scope, new_context, new_user, "…".into());
+                    listing = None;
                 }
-                Err(err) => app.set_status(
+                Err((context, err)) => app.set_status(
                     format!("could not switch to {context}: {err}"),
                     app::StatusKind::Error,
                 ),
+            },
+            Some((node, service, result)) = node_rx.recv() => {
+                app.on_node_logs(node, service, result);
             }
+            Some(result) = desc_rx.recv() => app.on_describe(result),
+            Some(result) = vol_rx.recv() => app.on_volume_usage(result),
+            _ = tokio::time::sleep_until(next_frame), if app.dirty => {}
+            _ = ticker.tick() => {}
+            _ = &mut ctrl_c => app.should_quit = true,
+        }
+
+        if app.should_quit {
+            break;
+        }
+
+        // A context switch rebuilds the client and everything hanging off it;
+        // the result comes back on `ctx_rx`.
+        if let Some(context) = app.pending_context.take() {
+            let tx = ctx_tx.clone();
+            tokio::spawn(async move {
+                let result = k8s::connect(Some(&context))
+                    .await
+                    .map_err(|err| (context, format!("{err:#}")));
+                let _ = tx.send(result).await;
+            });
         }
 
         // A namespace change re-scopes the pollers without touching the client.
@@ -373,11 +412,22 @@ async fn run(
             });
         }
 
+        // Keep the browsed list live. Only while browsing: in the detail view
+        // the selected row *is* the object on screen, and a refresh that
+        // dropped it would silently switch what you are looking at.
+        if app.right == app::RightMode::Browse
+            && listing.is_none()
+            && !app.loading
+            && last_listed.elapsed() >= list_refresh
+        {
+            app.loading = true;
+        }
+
         // Service a pending list request. Guarded so holding `Ctrl-r` cannot
         // pile up overlapping requests against the API server.
-        if app.loading && !listing {
-            if let Some(kind) = app.current_type().cloned() {
-                listing = true;
+        if app.loading && listing.is_none() {
+            if let (Some(kind), Some(key)) = (app.current_type().cloned(), list_key(&app)) {
+                listing = Some(key.clone());
                 let client = app.client.clone();
                 let scope = app.scope.clone();
                 let selector = app.selector_text.clone();
@@ -386,7 +436,7 @@ async fn run(
                     let result = k8s::resources::list(&client, &kind, &scope, &selector)
                         .await
                         .map_err(|e| format!("listing {}: {e}", kind.name()));
-                    let _ = tx.send(result).await;
+                    let _ = tx.send((key, result)).await;
                 });
             } else {
                 app.loading = false;
@@ -405,6 +455,33 @@ async fn run(
     pollers.abort();
     app.detach_all();
     Ok(())
+}
+
+/// What a list request is for. Two requests with the same key would return
+/// the same rows.
+fn list_key(app: &App) -> Option<String> {
+    let kind = app.current_type()?;
+    Some(format!(
+        "{}|{}|{}|{}",
+        app.context_name,
+        kind.qualified(),
+        app.scope.label(),
+        app.selector_text
+    ))
+}
+
+/// The apiserver version is decoration for the header; never wait for it.
+fn spawn_version(
+    client: &kube::Client,
+    context: &str,
+    tx: tokio::sync::mpsc::Sender<(String, String)>,
+) {
+    let client = client.clone();
+    let context = context.to_string();
+    tokio::spawn(async move {
+        let version = k8s::server_version(&client).await;
+        let _ = tx.send((context, version)).await;
+    });
 }
 
 /// Discovery is a burst of requests, so it runs off the UI thread and reports

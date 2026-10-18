@@ -200,6 +200,11 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 `last-applied-configuration` annotation. It is an overlay rather than a tab,
 and works straight from the list without opening the object first.
 
+**Secret values are redacted**: a Secret shows its keys as
+`<redacted, N bytes>`, so you can check that a key exists and is not empty
+without reading it — even when kscope runs with a token that could. Set
+`describe.show_secret_values = true` to opt out.
+
 > The logs tab resolves whatever you opened down to pods: a Deployment,
 > StatefulSet, DaemonSet, Job or ReplicaSet through its replicas, a Service or
 > CRD through its `spec.selector`, a Namespace or Node through everything running
@@ -251,6 +256,9 @@ kscope runs with zero configuration. To customise it, drop a file at
 inventory_refresh_ms = 5000
 events_refresh_ms = 10000
 max_fps = 30
+
+[describe]
+show_secret_values = false   # Secrets render as <redacted, N bytes>
 
 [logs]
 buffer_lines = 0     # 0 = unlimited (default): never evict
@@ -336,8 +344,23 @@ The design targets pods that emit tens of thousands of lines per second:
   something actually changed.
 * **Only the visible window is styled** — cost per frame is independent of how
   many lines are in the buffer.
-* Discovery and resource listings run off the UI task, so a slow API server
-  never freezes the interface.
+* Pods, nodes, PVCs, namespaces and events are **watched**, not re-listed: one
+  paginated LIST on start, then only the changes. A quiet cluster costs next
+  to nothing, and a pod going `CrashLoopBackOff` shows up in under a second.
+* A log stream that drops reconnects **from the last line it delivered**
+  (`sinceTime`, then de-duplicated by timestamp) instead of replaying the
+  container's whole history into the buffer — and a finished container is not
+  re-polled twice a second.
+* A log batch is flushed 100 ms after its *first* line, so a steady trickle is
+  never held back waiting for 512 lines to pile up.
+* Search hit counts, the buffer's memory figure and table rendering are all
+  incremental or windowed: no per-frame or per-batch pass over the buffer or
+  the whole list.
+* Discovery uses the aggregated discovery API (two requests, Kubernetes 1.26+)
+  and falls back to the per-group walk on older clusters. Discovery, listings,
+  the version probe and context switches all run off the UI task, so a slow
+  API server or an exec credential plugin never freezes the interface.
+* An idle kscope does not redraw or wake up on a frame timer.
 * Release builds use fat LTO and a single codegen unit.
 
 ## Requirements
@@ -350,7 +373,8 @@ The design targets pods that emit tens of thousands of lines per second:
 ## Contributing
 
 Bug reports, feature requests and pull requests are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). Everyone participating is expected to follow
+[CONTRIBUTING.md](CONTRIBUTING.md). What is planned next, and what is deliberately
+out of scope, is in [docs/ROADMAP.md](docs/ROADMAP.md). Everyone participating is expected to follow
 the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License

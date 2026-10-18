@@ -94,8 +94,15 @@ fn short_name(group: &str, plural: &str) -> Option<&'static str> {
 
 /// Ask the cluster what it serves. Only kinds that can actually be listed are
 /// returned, so the palette never offers something that will error on Enter.
+///
+/// Aggregated discovery (Kubernetes 1.26+) answers in two requests; the
+/// classic walk costs one request per API group, sequentially, which on a
+/// cluster with a few dozen CRD groups was most of kscope's startup time.
 pub async fn discover(client: &kube::Client) -> Result<Vec<ResourceType>> {
-    let discovery = Discovery::new(client.clone()).run().await?;
+    let discovery = match Discovery::new(client.clone()).run_aggregated().await {
+        Ok(discovery) => discovery,
+        Err(_) => Discovery::new(client.clone()).run().await?,
+    };
     let mut out = Vec::new();
     for group in discovery.groups() {
         for (api, caps) in group.recommended_resources() {
@@ -147,6 +154,11 @@ impl ResourceRow {
     }
 }
 
+/// Objects per LIST page.
+const PAGE: u32 = 500;
+/// Hard ceiling on a listing, so a runaway kind cannot exhaust memory.
+const MAX_ROWS: usize = 50_000;
+
 /// List every object of `kind` in `scope`.
 pub async fn list(
     client: &kube::Client,
@@ -158,16 +170,26 @@ pub async fn list(
         (false, _) | (true, Scope::AllNamespaces) => Api::all_with(client.clone(), &kind.api),
         (true, Scope::Namespace(ns)) => Api::namespaced_with(client.clone(), ns, &kind.api),
     };
-    let mut lp = ListParams::default().limit(1000);
-    // Let the API server do the filtering when a selector is set — it is both
-    // cheaper and the only way to narrow a list capped at 1000 items.
+    let mut lp = ListParams::default().limit(PAGE);
+    // Let the API server do the filtering when a selector is set.
     if !selector.trim().is_empty() {
         lp = lp.labels(selector.trim());
     }
-    let list = api.list(&lp).await?;
     let now = chrono::Utc::now().timestamp();
 
-    let mut rows: Vec<ResourceRow> = list.items.iter().map(|o| convert(o, now)).collect();
+    // Page through rather than stopping at the first page: a single capped
+    // LIST silently hid everything past item 1000 on a big cluster. Each page
+    // is converted and dropped straight away, so the full objects are never
+    // all resident at once.
+    let mut rows: Vec<ResourceRow> = Vec::new();
+    loop {
+        let page = api.list(&lp).await?;
+        rows.extend(page.items.iter().map(|o| convert(o, now)));
+        match page.metadata.continue_.filter(|c| !c.is_empty()) {
+            Some(token) if rows.len() < MAX_ROWS => lp = lp.continue_token(&token),
+            _ => break,
+        }
+    }
     rows.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(a.name.cmp(&b.name)));
     Ok(rows)
 }

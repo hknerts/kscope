@@ -292,6 +292,19 @@ pub struct LogBuffer {
     pub filter: Filter,
     /// Per-level counters over the retained window.
     pub counts: [u64; 6],
+    /// Resident size of the retained lines, kept as lines come and go so the
+    /// status bar never has to walk the buffer to report it.
+    bytes: usize,
+}
+
+/// What [`LogBuffer::push`] did, so callers can keep derived counts (such as
+/// search hits) incremental instead of rescanning.
+#[derive(Debug, Default)]
+pub struct Pushed {
+    /// The new line passed the filter and is in the view.
+    pub shown: bool,
+    /// The line evicted to make room, when it was in the view.
+    pub evicted: Option<LogLine>,
 }
 
 impl LogBuffer {
@@ -307,6 +320,7 @@ impl LogBuffer {
             view: VecDeque::new(),
             filter: Filter::default(),
             counts: [0; 6],
+            bytes: 0,
         }
     }
 
@@ -318,8 +332,7 @@ impl LogBuffer {
     /// Rough resident size of the retained lines, in bytes. Shown in the status
     /// bar so an unbounded session cannot silently eat the machine.
     pub fn memory_bytes(&self) -> usize {
-        const OVERHEAD: usize = std::mem::size_of::<LogLine>();
-        self.lines.iter().map(|l| l.raw.len() + OVERHEAD).sum()
+        self.bytes
     }
 
     pub fn len(&self) -> usize {
@@ -339,13 +352,16 @@ impl LogBuffer {
         self.counts[level as usize]
     }
 
-    pub fn push(&mut self, line: LogLine) {
+    pub fn push(&mut self, line: LogLine) -> Pushed {
+        let mut out = Pushed::default();
         self.received += 1;
         if self.cap == Some(self.lines.len()) {
             if let Some(old) = self.lines.pop_front() {
                 self.counts[old.level as usize] = self.counts[old.level as usize].saturating_sub(1);
+                self.bytes -= line_bytes(&old);
                 if self.view.front() == Some(&self.base) {
                     self.view.pop_front();
+                    out.evicted = Some(old);
                 }
                 self.base += 1;
                 self.dropped += 1;
@@ -353,16 +369,20 @@ impl LogBuffer {
         }
         let id = self.base + self.lines.len() as u64;
         self.counts[line.level as usize] += 1;
+        self.bytes += line_bytes(&line);
         if self.filter.accepts(&line) {
             self.view.push_back(id);
+            out.shown = true;
         }
         self.lines.push_back(line);
+        out
     }
 
     pub fn clear(&mut self) {
         self.lines.clear();
         self.view.clear();
         self.counts = [0; 6];
+        self.bytes = 0;
         self.base += self.received - self.dropped;
         self.dropped = 0;
     }
@@ -393,9 +413,7 @@ impl LogBuffer {
         let end = (start + len).min(self.view.len());
         let start = start.min(end);
         self.view
-            .iter()
-            .skip(start)
-            .take(end - start)
+            .range(start..end)
             .filter_map(move |id| self.lines.get((*id - self.base) as usize))
     }
 
@@ -419,6 +437,13 @@ impl LogBuffer {
             })
     }
 
+    /// Number of lines in the filtered view that match `re`.
+    pub fn count_matches(&self, re: &Regex) -> usize {
+        self.view_range(0, self.view.len())
+            .filter(|l| re.is_match(&l.raw))
+            .count()
+    }
+
     /// Render the whole filtered view as plain text (used by the export command).
     pub fn to_plain_text(&self) -> String {
         let mut out = String::with_capacity(self.view.len() * 96);
@@ -430,6 +455,10 @@ impl LogBuffer {
         }
         out
     }
+}
+
+fn line_bytes(line: &LogLine) -> usize {
+    line.raw.len() + std::mem::size_of::<LogLine>()
 }
 
 /// Compiles the built-in and user-supplied highlight rules once, then applies
@@ -614,6 +643,31 @@ mod tests {
         assert_eq!(buf.dropped, 136);
         assert_eq!(buf.view_len(), 64);
         assert_eq!(&*buf.view_line(0).unwrap().raw, "line 136");
+    }
+
+    #[test]
+    fn resident_size_tracks_pushes_evictions_and_clears() {
+        let mut buf = LogBuffer::new(64);
+        let size = |n: usize| n * (6 + std::mem::size_of::<LogLine>());
+        for i in 0..64 {
+            buf.push(line(&format!("line{:02}", i)));
+        }
+        assert_eq!(buf.memory_bytes(), size(64));
+        let pushed = buf.push(line("line64"));
+        assert!(pushed.shown);
+        assert_eq!(&*pushed.evicted.unwrap().raw, "line00");
+        assert_eq!(buf.memory_bytes(), size(64));
+        buf.clear();
+        assert_eq!(buf.memory_bytes(), 0);
+    }
+
+    #[test]
+    fn counts_matches_in_the_view() {
+        let mut buf = LogBuffer::new(0);
+        for i in 0..10 {
+            buf.push(line(&format!("req {i}")));
+        }
+        assert_eq!(buf.count_matches(&Regex::new("req [0-4]$").unwrap()), 5);
     }
 
     #[test]
