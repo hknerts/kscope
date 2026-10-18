@@ -6,6 +6,11 @@
 //! out — managed fields, the last-applied-configuration annotation and the
 //! resource version churn that makes two identical objects look different.
 //!
+//! Secret values are redacted unless the user opts in: kscope is meant to be
+//! safe to hand to anyone, and describe must not be the easiest way to read
+//! credentials out of a cluster. Keys and sizes stay visible, because "is the
+//! key there, and is it empty?" is what you are usually checking.
+//!
 //! The emitter is written out rather than pulled in: `serde_yaml` is
 //! unmaintained, and a read-only viewer should not add an advisory to the
 //! dependency audit for the sake of one screen.
@@ -21,10 +26,14 @@ const HIDDEN_ANNOTATIONS: [&str; 2] = [
     "kubectl.kubernetes.io/restartedAt",
 ];
 
-/// Strip the bookkeeping, then render as YAML.
-pub fn render(object: &Value) -> String {
+/// Strip the bookkeeping, then render as YAML. Secret values are replaced by
+/// their size unless `reveal_secrets` is set.
+pub fn render(object: &Value, reveal_secrets: bool) -> String {
     let mut cleaned = object.clone();
     redact(&mut cleaned);
+    if !reveal_secrets {
+        hide_secret_values(&mut cleaned);
+    }
     let mut out = String::new();
     emit(&cleaned, 0, &mut out, false);
     out
@@ -50,6 +59,45 @@ fn redact(value: &mut Value) {
             }
         }
     }
+}
+
+/// A core `v1` Secret: other groups' `Secret` kinds are not this shape.
+fn is_secret(object: &Value) -> bool {
+    object["kind"] == "Secret" && object["apiVersion"] == "v1"
+}
+
+/// Replace every value under `data` (base64) and `stringData` (plain) with a
+/// marker that keeps the decoded size.
+fn hide_secret_values(object: &mut Value) {
+    if !is_secret(object) {
+        return;
+    }
+    for (field, base64) in [("data", true), ("stringData", false)] {
+        let Some(map) = object.get_mut(field).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for value in map.values_mut() {
+            let bytes = match value.as_str() {
+                Some(s) if base64 => decoded_len(s),
+                Some(s) => s.len(),
+                None => 0,
+            };
+            *value = Value::String(format!("<redacted, {bytes} bytes>"));
+        }
+    }
+}
+
+/// Decoded length of a base64 string, without decoding it.
+fn decoded_len(encoded: &str) -> usize {
+    let s = encoded.trim();
+    let padding = s.bytes().rev().take_while(|&b| b == b'=').count();
+    (s.len() / 4 * 3
+        + match s.len() % 4 {
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        })
+    .saturating_sub(padding)
 }
 
 /// Emit `value` at `indent`. `inline` means the caller already wrote the key
@@ -152,10 +200,64 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Most tests are about the emitter, not redaction.
+    fn render_all(value: &Value) -> String {
+        render(value, true)
+    }
+
+    fn secret() -> Value {
+        json!({
+            "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": "db"},
+            // "hunter2" and "" in base64.
+            "data": {"password": "aHVudGVyMg==", "empty": ""},
+            "stringData": {"note": "plain text"}
+        })
+    }
+
+    #[test]
+    fn secret_values_are_redacted_by_default() {
+        let got = render(&secret(), false);
+        assert!(!got.contains("aHVudGVyMg"), "{got}");
+        assert!(!got.contains("plain text"), "{got}");
+        assert!(got.contains("password: <redacted, 7 bytes>"), "{got}");
+        assert!(got.contains("empty: <redacted, 0 bytes>"), "{got}");
+        assert!(got.contains("note: <redacted, 10 bytes>"), "{got}");
+        // Everything that is not a value stays readable.
+        assert!(got.contains("name: db") && got.contains("type: Opaque"));
+    }
+
+    #[test]
+    fn secret_values_can_be_revealed_explicitly() {
+        assert!(render(&secret(), true).contains("password: aHVudGVyMg=="));
+    }
+
+    #[test]
+    fn only_core_secrets_are_redacted() {
+        let configmap = json!({"apiVersion": "v1", "kind": "ConfigMap", "data": {"k": "v"}});
+        assert!(render(&configmap, false).contains("k: v"));
+        let foreign = json!({"apiVersion": "example.com/v1", "kind": "Secret", "data": {"k": "v"}});
+        assert!(render(&foreign, false).contains("k: v"));
+    }
+
+    #[test]
+    fn computes_base64_decoded_lengths() {
+        for (encoded, len) in [
+            ("", 0),
+            ("YQ==", 1),
+            ("YWI=", 2),
+            ("YWJj", 3),
+            ("YWJjZA==", 4),
+        ] {
+            assert_eq!(decoded_len(encoded), len, "{encoded}");
+        }
+    }
+
     #[test]
     fn renders_nested_maps() {
-        let got =
-            render(&json!({"kind": "Pod", "spec": {"nodeName": "n1", "restartPolicy": "Always"}}));
+        let got = render_all(
+            &json!({"kind": "Pod", "spec": {"nodeName": "n1", "restartPolicy": "Always"}}),
+        );
         assert_eq!(
             got,
             "kind: Pod\nspec:\n  nodeName: n1\n  restartPolicy: Always\n"
@@ -164,21 +266,21 @@ mod tests {
 
     #[test]
     fn renders_a_list_of_maps_with_the_first_key_on_the_dash() {
-        let got = render(&json!({"containers": [{"name": "app", "image": "busybox"}]}));
+        let got = render_all(&json!({"containers": [{"name": "app", "image": "busybox"}]}));
         assert_eq!(got, "containers:\n  - image: busybox\n    name: app\n");
     }
 
     #[test]
     fn renders_scalar_lists() {
         assert_eq!(
-            render(&json!({"args": ["sh", "-c", "sleep 1"]})),
+            render_all(&json!({"args": ["sh", "-c", "sleep 1"]})),
             "args:\n  - sh\n  - -c\n  - sleep 1\n"
         );
     }
 
     #[test]
     fn strips_managed_fields_and_the_last_applied_annotation() {
-        let got = render(&json!({
+        let got = render_all(&json!({
             "metadata": {
                 "name": "api",
                 "managedFields": [{"manager": "kubectl"}],
@@ -195,7 +297,7 @@ mod tests {
 
     #[test]
     fn keeps_annotations_that_still_have_content() {
-        let got = render(&json!({
+        let got = render_all(&json!({
             "metadata": {"annotations": {
                 "kubectl.kubernetes.io/last-applied-configuration": "{...}",
                 "team": "payments"
@@ -209,26 +311,26 @@ mod tests {
     fn quotes_scalars_that_would_otherwise_change_type() {
         // A port of "8080" or a version of "1.30" must not read as a number,
         // and "true" must not read as a boolean.
-        let got = render(&json!({"a": "8080", "b": "true", "c": "plain", "d": ""}));
+        let got = render_all(&json!({"a": "8080", "b": "true", "c": "plain", "d": ""}));
         assert_eq!(got, "a: \"8080\"\nb: \"true\"\nc: plain\nd: \"\"\n");
     }
 
     #[test]
     fn renders_multiline_strings_as_block_scalars() {
-        let got = render(&json!({"script": "line one\nline two"}));
+        let got = render_all(&json!({"script": "line one\nline two"}));
         assert_eq!(got, "script: |-\n    line one\n    line two\n");
     }
 
     #[test]
     fn renders_empty_collections_and_nulls() {
         assert_eq!(
-            render(&json!({"a": {}, "b": [], "c": null, "d": 3, "e": true})),
+            render_all(&json!({"a": {}, "b": [], "c": null, "d": 3, "e": true})),
             "a: {}\nb: []\nc: null\nd: 3\ne: true\n"
         );
     }
 
     #[test]
     fn survives_a_non_object_root() {
-        assert_eq!(render(&json!("bare")), "bare\n");
+        assert_eq!(render_all(&json!("bare")), "bare\n");
     }
 }

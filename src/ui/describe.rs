@@ -54,10 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // scroll than a five-line Service.
     let height = inner.height as usize;
     let lines: Vec<Line> = app
-        .describe_text
-        .lines()
-        .skip(app.describe_scroll)
-        .take(height)
+        .describe_window(app.describe_scroll, height)
         .map(|line| style_line(line, theme))
         .collect();
 

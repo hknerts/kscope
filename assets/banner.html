@@ -1,0 +1,120 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  :root{
+    --bg0:#070b14; --bg1:#0c1322; --line:#1b2638; --dim:#5b6b82; --fg:#c9d4e3;
+    --cyan:#3ad6e8; --cyan2:#1aa7c2; --red:#ff5d6c; --yellow:#f3c64b; --green:#52d68a; --blue:#6aa0ff; --magenta:#d78cff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:1584px;height:672px;overflow:hidden;background:var(--bg0)}
+  body{font-family:"SF Pro Display",-apple-system,"Helvetica Neue",sans-serif;color:var(--fg);position:relative}
+  .bg{position:absolute;inset:0;
+    background:
+      radial-gradient(900px 520px at 78% 40%, rgba(58,214,232,.13), transparent 70%),
+      radial-gradient(700px 500px at 8% 110%, rgba(106,160,255,.10), transparent 70%),
+      linear-gradient(180deg,#09101d 0%, #060a12 100%);}
+  .grid{position:absolute;inset:0;opacity:.35;
+    background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+    background-size:48px 48px;
+    -webkit-mask-image:radial-gradient(ellipse 70% 80% at 30% 50%, #000 20%, transparent 75%);}
+  .left{position:absolute;left:84px;top:0;bottom:0;width:560px;display:flex;flex-direction:column;justify-content:center}
+  .mark{display:flex;align-items:center;gap:22px}
+  .lens{width:86px;height:86px;flex:none}
+  h1{font-size:104px;font-weight:700;letter-spacing:-4px;line-height:1;
+     background:linear-gradient(180deg,#f2fbff 0%,#a9e9f2 100%);-webkit-background-clip:text;color:transparent}
+  .tag{margin-top:26px;font-size:30px;font-weight:500;color:#e3ebf5;letter-spacing:-.3px;line-height:1.3}
+  .tag b{color:var(--cyan);font-weight:600}
+  .pills{display:flex;gap:12px;margin-top:30px}
+  .pill{font:500 17px "SF Mono",Menlo,monospace;padding:9px 16px;border-radius:999px;border:1px solid #23324a;background:rgba(17,27,45,.8);color:#cfe0ee;display:flex;align-items:center;gap:9px}
+  .pill i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .verbs{margin-top:34px;font:500 17px "SF Mono",Menlo,monospace;color:var(--dim)}
+  .verbs span{color:var(--green)}
+  .verbs em{font-style:normal;color:#8394ad}
+
+  /* terminal */
+  .term{position:absolute;right:64px;top:62px;width:850px;height:548px;border-radius:14px;
+    background:rgba(9,14,24,.96);border:1px solid #223049;
+    box-shadow:0 40px 90px rgba(0,0,0,.6),0 0 0 1px rgba(58,214,232,.06),0 0 80px rgba(58,214,232,.10);overflow:hidden}
+  .bar{height:38px;display:flex;align-items:center;gap:8px;padding:0 16px;background:#0e1626;border-bottom:1px solid #1c283c}
+  .dot{width:12px;height:12px;border-radius:50%}
+  .bar .t{margin-left:14px;font:500 13px "SF Mono",Menlo,monospace;color:#6c7d96}
+  .scr{font:13.4px/19.5px "SF Mono",Menlo,monospace;padding:10px 14px;white-space:pre;color:var(--fg)}
+  .c{color:var(--cyan)} .cb{color:var(--cyan);font-weight:700} .d{color:var(--dim)} .r{color:var(--red)} .rb{color:var(--red);font-weight:700}
+  .y{color:var(--yellow)} .g{color:var(--green)} .b{color:var(--blue)} .m{color:var(--magenta)} .w{color:#e9f0f8}
+  .sel{background:var(--cyan);color:#05121a;font-weight:700}
+  .hit{background:var(--yellow);color:#111}
+  .tab{background:var(--cyan);color:#05121a;font-weight:700}
+
+  .term{height:auto}
+  .scr{white-space:normal;padding:14px 18px 12px}
+  .hdr{display:flex;gap:44px;white-space:pre;padding-bottom:10px;border-bottom:1px solid #26344b;margin-bottom:12px}
+  .body{display:flex;gap:10px}
+  .box{position:relative;border:1px solid var(--cyan2);border-radius:3px;padding:12px 12px 8px;white-space:pre}
+  .lbl{position:absolute;top:-10px;left:10px;background:rgb(9,14,24);padding:0 6px;color:var(--cyan)}
+  .ctx{width:150px;border-color:#34445e}
+  .ctx .lbl{color:#8aa0bd}
+  .right{flex:1;display:flex;flex-direction:column;gap:6px;white-space:pre;min-width:0}
+  .logs{margin-top:8px;flex:1}
+  .status{margin-top:10px;white-space:pre}
+  .term{top:50%;transform:translateY(-50%)}
+</style></head>
+<body>
+<div class="bg"></div><div class="grid"></div>
+
+<div class="left">
+  <div class="mark">
+    <svg class="lens" viewBox="0 0 86 86" fill="none">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7ff0fb"/><stop offset="1" stop-color="#1aa7c2"/></linearGradient></defs>
+      <circle cx="37" cy="37" r="26" stroke="url(#g)" stroke-width="7"/>
+      <path d="M56 56 L76 76" stroke="url(#g)" stroke-width="9" stroke-linecap="round"/>
+      <path d="M22 41 h7 l4 -10 l6 19 l4 -9 h7" stroke="#e9fbff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1>kscope</h1>
+  </div>
+  <div class="tag">A fast, <b>read-only</b> Kubernetes TUI.<br>Browse any resource, then read its<br>logs, metrics and events.</div>
+  <div class="pills">
+    <div class="pill"><i style="background:var(--yellow)"></i>logs</div>
+    <div class="pill"><i style="background:var(--green)"></i>monitoring</div>
+    <div class="pill"><i style="background:var(--red)"></i>events</div>
+    <div class="pill"><i style="background:var(--blue)"></i>describe</div>
+  </div>
+  <div class="verbs"><span>get · list · watch</span> <em>— and nothing else, by construction</em></div>
+</div>
+
+<div class="term">
+  <div class="bar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="t">kscope — prod-eu</span></div>
+<div class="scr">
+<div class="hdr"><div><span class="cb">kscope</span> <span class="w">:deployments</span>
+<span class="d">context </span>prod-eu
+<span class="d">k8s     </span>v1.31.2
+<span class="d">ns:</span>payments <span class="d">items:</span>14 <span class="d">cpu:</span>41% <span class="d">mem:</span>63%</div><div><span class="cb">l/m/E </span><span class="d">logs/monitoring/events</span>
+<span class="cb">/     </span><span class="d">search</span>
+<span class="cb">\     </span><span class="d">filter</span>
+<span class="cb">L/e   </span><span class="d">level/errors</span></div><div><span class="cb">F/w </span><span class="d">follow/wrap</span>
+<span class="cb">t/p </span><span class="d">time/prev</span>
+<span class="cb">c/s </span><span class="d">clear/save</span>
+<span class="cb">?   </span><span class="d">help</span></div></div>
+<div class="body">
+<div class="box ctx"><span class="lbl">contexts</span><span class="g">●</span> <span class="w">prod-eu</span>
+  prod-us
+  staging
+  kind-local</div>
+<div class="right">
+<div><span class="tab"> payments/checkout </span> <span class="tab"> l:logs </span><span class="d">  m:monitoring  E:events   d: describe</span></div>
+<div><span class="d">levels:</span> <span class="rb">FATAL</span> <span class="d">0</span>  <span class="r">ERROR</span> <span class="d">12</span>  <span class="y">WARN</span> <span class="d">87</span>  <span class="g">INFO</span> <span class="d">48 210</span>  <span class="d">buffer 9.8 MiB · unlimited</span></div>
+<div class="box logs"><span class="lbl">logs · 3 streams · follow · wrap</span><span class="m">checkout-7d9c</span> <span class="d">12:04:09</span> <span class="g">INFO </span> order <span class="b">a41f9e2c</span> accepted <span class="g">200</span> in 14ms
+<span class="y">checkout-k2xq</span> <span class="d">12:04:10</span> <span class="g">INFO </span> GET /v1/cart <span class="g">200</span> from <span class="c">10.4.2.17:8080</span>
+<span class="g">checkout-p8mz</span> <span class="d">12:04:11</span> <span class="y">WARN  <b>retrying</b> payment authorisation</span>
+<span class="m">checkout-7d9c</span> <span class="d">12:04:11</span> <span class="g">INFO </span> <span class="hit">ledger</span> sync ok, 312 rows
+<span class="g">checkout-p8mz</span> <span class="d">12:04:12</span> <span class="rb">ERROR upstream refused: timeout</span>
+<span class="y">checkout-k2xq</span> <span class="d">12:04:12</span> <span class="g">INFO </span> POST /v1/pay <span class="r">503</span> in 2.1s
+<span class="m">checkout-7d9c</span> <span class="d">12:04:13</span> <span class="g">INFO </span> order <span class="b">c07b11de</span> accepted <span class="g">201</span> in 9ms
+<span class="g">checkout-p8mz</span> <span class="d">12:04:13</span> <span class="rb">FATAL</span> <span class="r">panic: nil map write</span>
+<span class="y">checkout-k2xq</span> <span class="d">12:04:14</span> <span class="g">INFO </span> <span class="hit">ledger</span> sync ok, 298 rows
+<span class="m">checkout-7d9c</span> <span class="d">12:04:14</span> <span class="g">INFO </span> GET /healthz <span class="g">200</span> in 1ms
+<span class="g">checkout-p8mz</span> <span class="d">12:04:15</span> <span class="w">membership changed: +1 -1 containers</span></div>
+</div></div>
+<div class="status"><span class="g">streaming payments/checkout-p8mz:app</span><span class="d">  │  48 309/48 309 lines  FOLLOW  </span><span class="c">/ledger/ 214 hits</span><span class="d">  │  ? help</span></div>
+</div>
+</div>
+</body></html>

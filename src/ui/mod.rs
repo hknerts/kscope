@@ -468,6 +468,17 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The slice of a `len`-row table that is on screen with `selected`
+/// highlighted, given `height` visible rows — the same window ratatui would
+/// scroll to from a fresh `TableState`. Building only these rows keeps a frame
+/// O(screen) rather than O(list) on a 10 000-pod namespace.
+pub(crate) fn table_window(selected: usize, len: usize, height: usize) -> std::ops::Range<usize> {
+    let height = height.max(1);
+    let selected = selected.min(len.saturating_sub(1));
+    let start = (selected + 1).saturating_sub(height);
+    start..(start + height).min(len)
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -501,6 +512,16 @@ pub(crate) fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_window_keeps_the_selection_on_screen() {
+        assert_eq!(table_window(0, 100, 10), 0..10);
+        assert_eq!(table_window(9, 100, 10), 0..10);
+        assert_eq!(table_window(10, 100, 10), 1..11);
+        assert_eq!(table_window(99, 100, 10), 90..100);
+        assert_eq!(table_window(3, 5, 10), 0..5);
+        assert_eq!(table_window(0, 0, 10), 0..0);
+    }
 
     #[test]
     fn truncates_with_ellipsis() {

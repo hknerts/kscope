@@ -14,7 +14,7 @@ survive a pod that emits 50 000 log lines per second.
   metrics.k8s.io    │  metrics poller  │──┼──────────►  ┌───────────┐   ┌────────┐
                     └──────────────────┘  │             │    App    │──►│   ui   │
                     ┌──────────────────┐  │             │  (state)  │   │ render │
-  pods/nodes list   │ inventory poller │──┤             └───────────┘   └────────┘
+  pods/nodes watch  │ inventory watch  │──┤             └───────────┘   └────────┘
                     └──────────────────┘  │                  ▲
                     ┌──────────────────┐  │                  │ frame budget
   pods/log?follow   │ log streams × N  │──┘                  │ (max_fps)
@@ -36,6 +36,26 @@ keep it responsive:
    is drawn when `dirty && last_draw.elapsed() >= frame_budget`. Ten thousand
    lines arriving in one tick cost exactly one redraw.
 
+## Inventory and events: watched, not polled
+
+Pods, ReplicaSets (metadata only), nodes, namespaces (metadata only), PVCs and
+events each run a `kube::runtime` reflector: a paginated LIST on start, then a
+WATCH. `k8s::watch::drive` flags the cache as changed on every event; a
+publisher coalesces bursts for 250 ms and rebuilds the snapshot locally. With
+nothing changing, a heartbeat (`inventory_refresh_ms`, `events_refresh_ms`)
+re-sends it so ages keep moving. Managed fields and node image lists are
+stripped as objects arrive, because they are the bulk of the cached bytes and
+nothing reads them.
+
+Optional kinds stay optional: a watch the token may not perform just retries
+with backoff, and the snapshot falls back as before (namespaces derived from
+pods, pods grouped under their ReplicaSet).
+
+The browsed resource list is generic (`DynamicObject`) and is re-listed, paged
+500 at a time, every `inventory_refresh_ms` while browsing. Each request is
+tagged with its kind, scope and selector, so an answer that arrives after the
+user moved on is dropped instead of overwriting the new list.
+
 ## Log pipeline
 
 ```
@@ -53,7 +73,14 @@ API server ──► kube log_stream ──► batching (512 lines / 100 ms) ─
 Design choices worth defending:
 
 * **Batching at the source.** The alternative — one channel message per line —
-  turns a chatty container into a scheduler storm.
+  turns a chatty container into a scheduler storm. The flush deadline starts at
+  a batch's first line; a per-line timeout would never fire for a steady
+  trickle and hold lines back until 512 had accumulated.
+* **Resume, never replay.** Streams always request timestamps. A reconnect asks
+  for `sinceTime` = the last delivered line and skips anything at or before
+  it, then the prefix is stripped unless the user turned timestamps on. A
+  stream that ends without delivering anything (a terminated container) backs
+  off instead of reconnecting every 500 ms.
 * **Classify once.** Severity is computed on arrival and stored as a one-byte
   enum. Filtering and colouring never re-scan text. Classification itself only
   looks at the first 512 bytes and uses a non-allocating case-insensitive scan

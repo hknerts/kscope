@@ -69,8 +69,15 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     // Cluster-scoped kinds have no namespace worth a column.
     let namespaced = app.current_type().map(|t| t.namespaced).unwrap_or(true);
 
-    let rows: Vec<Row> = app
-        .visible_rows()
+    // Borders and the header row take three lines.
+    let window = super::table_window(
+        app.row_selected,
+        app.row_view.len(),
+        area.height.saturating_sub(3) as usize,
+    );
+    let rows: Vec<Row> = app.row_view[window.clone()]
+        .iter()
+        .filter_map(|&i| app.rows.get(i))
         .map(|r| {
             let status_style = if r.unhealthy {
                 Style::default()
@@ -125,7 +132,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut state = TableState::default();
     state.select(Some(
-        app.row_selected.min(app.row_view.len().saturating_sub(1)),
+        app.row_selected.min(app.row_view.len().saturating_sub(1)) - window.start,
     ));
     f.render_stateful_widget(table, area, &mut state);
 }

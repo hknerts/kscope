@@ -249,6 +249,8 @@ pub struct App {
     pub describe_open: bool,
     /// Rendered YAML of the open object, and which object it belongs to.
     pub describe_text: String,
+    /// Byte range of every line in `describe_text`, computed once per fetch.
+    describe_lines: Vec<std::ops::Range<usize>>,
     pub describe_scroll: usize,
     pub describe_error: Option<String>,
     describe_for: Option<String>,
@@ -350,6 +352,7 @@ impl App {
             volume_usage_pending: false,
             describe_open: false,
             describe_text: String::new(),
+            describe_lines: Vec::new(),
             describe_scroll: 0,
             describe_error: None,
             describe_for: None,
@@ -663,13 +666,27 @@ impl App {
     pub fn on_log(&mut self, event: LogEvent) {
         match event {
             LogEvent::Batch { source, lines } => {
+                // Keep the hit count incremental: rescanning the whole buffer
+                // on every batch made an active search O(buffer) per batch.
+                let re = self.search.regex.as_ref();
+                let mut total = self.search.total;
                 for line in lines {
-                    self.buffer.push(LogLine::new(line, source.clone()));
+                    let line = LogLine::new(line, source.clone());
+                    let hit = re.is_some_and(|re| re.is_match(&line.raw));
+                    let pushed = self.buffer.push(line);
+                    if pushed.shown && hit {
+                        total += 1;
+                    }
+                    if let (Some(old), Some(re)) = (pushed.evicted, re) {
+                        if re.is_match(&old.raw) {
+                            total = total.saturating_sub(1);
+                        }
+                    }
                 }
+                self.search.total = total;
                 if self.follow {
                     self.scroll_to_bottom();
                 }
-                self.refresh_search_count();
                 self.dirty = true;
             }
             LogEvent::Attached(source) => {
@@ -779,6 +796,7 @@ impl App {
         }
         self.describe_for = Some(key);
         self.describe_text.clear();
+        self.describe_lines.clear();
         self.describe_error = None;
         self.describe_scroll = 0;
         self.describe_loading = true;
@@ -799,7 +817,9 @@ impl App {
     pub fn on_describe(&mut self, result: Result<serde_json::Value, String>) {
         match result {
             Ok(object) => {
-                self.describe_text = crate::describe::render(&object);
+                self.describe_text =
+                    crate::describe::render(&object, self.config.describe.show_secret_values);
+                self.describe_lines = line_spans(&self.describe_text);
                 self.describe_error = None;
             }
             Err(err) => {
@@ -814,7 +834,17 @@ impl App {
 
     /// Number of lines in the rendered object.
     pub fn describe_len(&self) -> usize {
-        self.describe_text.lines().count()
+        self.describe_lines.len()
+    }
+
+    /// Lines `start..start + len` of the rendered object, without walking the
+    /// text from the top on every frame.
+    pub fn describe_window(&self, start: usize, len: usize) -> impl Iterator<Item = &str> {
+        let end = (start + len).min(self.describe_lines.len());
+        let start = start.min(end);
+        self.describe_lines[start..end]
+            .iter()
+            .map(|r| self.describe_text[r.clone()].trim_end_matches('\r'))
     }
 
     /// The node service the logs tab is showing (`kubelet`, `containerd`, …).
@@ -1174,16 +1204,9 @@ impl App {
             self.search.total = 0;
             return;
         };
-        let mut total = 0usize;
-        let mut idx = 0usize;
-        while let Some(hit) = self.buffer.search_forward(idx, re) {
-            total += 1;
-            idx = hit + 1;
-            if total >= 100_000 {
-                break;
-            }
-        }
-        self.search.total = total;
+        // A full pass, but only on user action (new query, filter change);
+        // arriving lines keep the count up to date in `on_log`.
+        self.search.total = self.buffer.count_matches(re);
     }
 
     pub fn search_next(&mut self, backwards: bool) {
@@ -1849,9 +1872,36 @@ impl App {
     }
 }
 
+/// Byte ranges of the lines in `text`, as `str::lines` would split it.
+fn line_spans(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            spans.push(start..i);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        spans.push(start..text.len());
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_spans_split_like_str_lines() {
+        for text in ["", "a", "a\nb", "a\nb\n", "a\r\n\nc", "\n\n"] {
+            let spans: Vec<&str> = line_spans(text)
+                .into_iter()
+                .map(|r| text[r].trim_end_matches('\r'))
+                .collect();
+            assert_eq!(spans, text.lines().collect::<Vec<_>>(), "{text:?}");
+        }
+    }
 
     #[test]
     fn sort_cycles() {

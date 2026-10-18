@@ -72,8 +72,14 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let rows: Vec<Row> = app
-        .visible_events()
+    let window = super::table_window(
+        app.event_selected,
+        app.event_view.len(),
+        area.height.saturating_sub(3) as usize,
+    );
+    let rows: Vec<Row> = app.event_view[window.clone()]
+        .iter()
+        .filter_map(|&i| app.events.get(i))
         .map(|e| {
             let severity = if e.is_warning() {
                 Style::default()
@@ -134,7 +140,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(
         app.event_selected
-            .min(app.event_view.len().saturating_sub(1)),
+            .min(app.event_view.len().saturating_sub(1))
+            - window.start,
     ));
     f.render_stateful_widget(table, area, &mut state);
 }
