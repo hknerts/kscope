@@ -373,8 +373,7 @@ The design targets pods that emit tens of thousands of lines per second:
 ## Contributing
 
 Bug reports, feature requests and pull requests are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). What is planned next, and what is deliberately
-out of scope, is in [docs/ROADMAP.md](docs/ROADMAP.md). Everyone participating is expected to follow
+[CONTRIBUTING.md](CONTRIBUTING.md). Everyone participating is expected to follow
 the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
