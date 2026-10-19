@@ -29,7 +29,10 @@ pub struct Fleet {
 impl Fleet {
     /// Resolve `spec` against the configured fleets and the kubeconfig's
     /// contexts. `spec` is a configured fleet name, or a comma-separated list
-    /// of context globs (`stg-*,qa-eu`). `None` when nothing matches.
+    /// of context patterns (`stg-*,qa-eu`). A pattern without `*` or `?` is a
+    /// context name when one is called exactly that, and otherwise matches
+    /// every context containing it, so `-u stg` finds `kind-stg-eu` without
+    /// any configuration. `None` when nothing matches.
     pub fn resolve(
         spec: &str,
         configured: &BTreeMap<String, Vec<String>>,
@@ -41,7 +44,19 @@ impl Fleet {
         }
         let patterns: Vec<String> = match configured.get(spec) {
             Some(patterns) => patterns.clone(),
-            None => spec.split(',').map(|p| p.trim().to_string()).collect(),
+            None => spec
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let plain = !p.contains(['*', '?']);
+                    if plain && !contexts.iter().any(|c| c == p) {
+                        format!("*{p}*")
+                    } else {
+                        p.to_string()
+                    }
+                })
+                .collect(),
         };
         let members: Vec<String> = contexts
             .iter()
@@ -251,7 +266,25 @@ mod tests {
             vec!["kind-stg-eu", "kind-prod-eu", "minikube"]
         );
         assert!(Fleet::resolve("nothing-*", &none, &contexts()).is_none());
+        assert!(Fleet::resolve("nothing", &none, &contexts()).is_none());
         assert!(Fleet::resolve("  ", &none, &contexts()).is_none());
+    }
+
+    #[test]
+    fn a_plain_word_is_an_exact_name_or_a_substring() {
+        let none = BTreeMap::new();
+        let stg = Fleet::resolve("stg", &none, &contexts()).unwrap();
+        assert_eq!(stg.members, vec!["kind-stg-eu", "kind-stg-us"]);
+        // An exact context name means just that context, not every context
+        // that happens to contain it.
+        let mut with_prefix = contexts();
+        with_prefix.push("minikube-old".into());
+        let exact = Fleet::resolve("minikube", &none, &with_prefix).unwrap();
+        assert_eq!(exact.members, vec!["minikube"]);
+        // A configured fleet wins over the substring reading of its name.
+        let configured = BTreeMap::from([("stg".to_string(), vec!["kind-stg-eu".to_string()])]);
+        let fleet = Fleet::resolve("stg", &configured, &contexts()).unwrap();
+        assert_eq!(fleet.members, vec!["kind-stg-eu"]);
     }
 
     #[test]

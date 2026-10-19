@@ -129,8 +129,9 @@ kscope --tail 2000            # only the last 2000 log lines instead of everythi
 kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
 kscope --since 3600           # only lines from the last hour
 kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
-kscope --fleet staging                      # every staging cluster as one list
-kscope --fleet 'stg-*' -k deploy --find checkout   # search them and print, for scripts
+kscope -u stg                 # every context with "stg" in its name, as one list
+kscope get pods -u stg        # kubectl-style: list them across all of those clusters
+kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 ```
 
 ## Key bindings
@@ -223,7 +224,17 @@ without reading it — even when kscope runs with a token that could. Set
 ## Fleets: many clusters as one
 
 Say staging is five clusters and you want to know where `checkout` is running,
-or which of them has a pod in trouble. Name the set once:
+or which of them has a pod in trouble:
+
+```sh
+kscope get pods -u stg            # list, kubectl-style, and exit
+kscope -u stg                     # or browse them in the TUI and open what you find
+```
+
+`-u` (`--fleet`) takes a word, a glob or a fleet name. A plain word such as
+`stg` selects every kubeconfig context whose name contains it. It means one
+context only when a context has exactly that name. `stg-*,qa-eu` are globs.
+To give a set a name of its own, put it in the config:
 
 ```toml
 # ~/.config/kscope/config.toml
@@ -233,7 +244,7 @@ prod    = ["prod-eu-*", "prod-us-1"]
 ```
 
 Configured fleets appear at the top of the contexts pane, marked `◇`.
-`Enter` on one (or `kscope --fleet staging`) lists the current kind on **every
+`Enter` on one (or `kscope -u staging`) lists the current kind on **every
 member at once**, with a `context` column:
 
 ```
@@ -252,8 +263,8 @@ member at once**, with a `context` column:
   switches kscope to that cluster and opens the object there — logs,
   monitoring, events and describe always come from the cluster the row lives
   on. `Esc` brings you back to the fleet-wide list, still filtered.
-* **Ad hoc**: no config needed. `/` on the contexts pane takes globs
-  (`stg-*,qa-eu`), and so does `--fleet`.
+* **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
+  and globs as `-u`.
 * **Leave**: pick a single context in the pane.
 
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
@@ -262,15 +273,21 @@ answer. An unreachable cluster is reported in the status bar and the header
 (`fleet:staging 4/5`). It never blocks the rest. kscope starts on your current context
 if it is a member, otherwise on the first member that answers.
 
-For scripts, `--find` prints the matches and exits (status 1 when there are
-none, like `grep`):
+Without the TUI, `kscope get KIND [NAME] -u FLEET` prints the matches and
+exits, like `kubectl get` with a `CONTEXT` column. `NAME` is a substring of the
+name or namespace. `-n` and `-l` narrow the search the same way as in kubectl:
 
 ```console
-$ kscope --fleet staging -k deploy --find checkout
+$ kscope get deploy checkout -u stg
 CONTEXT   NAMESPACE  NAME      STATUS  AGE
 stg-eu-1  shop       checkout  2/2     8m
 stg-us-2  shop       checkout  2/2     8m
+
+$ kscope get sts -u prod -n data
 ```
+
+`get` exits 0 even when nothing matches, as kubectl does. For grep-style exit
+codes use `--find TEXT -k KIND`, which exits 1 when nothing matches.
 
 Every member uses the credentials of its own kubeconfig context, and the
 [read-only guarantee](#permissions) holds for each of them.
