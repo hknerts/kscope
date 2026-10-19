@@ -84,3 +84,7 @@ jobs:
           cargo run --locked -- --fleet 'kind-*' --find noisy | tee /tmp/find.txt
           grep -Eq '^kind-[^ ]+ +default +noisy ' /tmp/find.txt
           ! cargo run --locked -- --fleet 'kind-*' --find no-such-pod
+      - name: kubectl-style get across a fleet by plain word
+        run: |
+          cargo run --locked -- get pods noisy -u kind | tee /tmp/get.txt
+          grep -Eq '^kind-[^ ]+ +default +noisy ' /tmp/get.txt

@@ -78,34 +78,37 @@ async fn main() -> Result<()> {
         .await
         .context("could not reach the cluster")?;
 
+    let search = cli.search();
     // Searching a fleet is about finding things wherever they are, so it
     // spans every namespace unless one is asked for.
     let explicit_ns = cli
         .namespace
         .clone()
         .or_else(|| config.general.namespace.clone());
-    let scope = if cli.all_namespaces
-        || (explicit_ns.is_none() && (fleet.is_some() || cli.find.is_some()))
-    {
-        Scope::AllNamespaces
-    } else {
-        Scope::Namespace(explicit_ns.unwrap_or(default_ns))
-    };
+    let scope =
+        if cli.all_namespaces || (explicit_ns.is_none() && (fleet.is_some() || search.is_some())) {
+            Scope::AllNamespaces
+        } else {
+            Scope::Namespace(explicit_ns.unwrap_or(default_ns))
+        };
 
     // Non-interactive mode: search and exit.
-    if let Some(needle) = &cli.find {
+    if let Some((kind, needle, strict)) = search {
         fleet_clients.insert(&context_name, client.clone()).await;
         let found = find(
             &fleet_clients,
             &context_name,
             fleet.as_ref(),
-            cli.kind.as_deref().unwrap_or("pods"),
+            &kind,
             &scope,
             cli.selector.as_deref().unwrap_or(""),
-            needle,
+            &needle,
         )
         .await?;
-        std::process::exit(if found { 0 } else { 1 });
+        if !found {
+            eprintln!("No resources found.");
+        }
+        std::process::exit(if found || !strict { 0 } else { 1 });
     }
 
     // Non-interactive mode: dump and exit.

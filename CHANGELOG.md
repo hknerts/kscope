@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-19
+
+### Added
+
+- `kscope get KIND [NAME] -u FLEET`: kubectl-style listing across a fleet,
+  e.g. `kscope get pods -u stg`, `kscope get deploy checkout -u prod`. `-n`,
+  `-l`, `-A` and `--context` work before or after the subcommand.
+- `-u` is short for `--fleet`, and a plain word selects every context whose
+  name contains it (`-u stg`), so no config is needed. An exact context name
+  still means just that context, and a configured fleet name still wins.
+
 ## [1.2.0] - 2026-10-19
 
 ### Added

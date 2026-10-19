@@ -2,28 +2,39 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// A fast, read-only Kubernetes TUI for logs and live metrics.
 #[derive(Debug, Parser)]
 #[command(name = "kscope", version, about, long_about = None)]
 pub struct Cli {
-    /// Namespace to watch. Defaults to the namespace of the current context.
-    #[arg(short, long, env = "KSCOPE_NAMESPACE")]
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    /// Namespace to watch. Defaults to the namespace of the current context
+    /// (to every namespace for a fleet or `get`).
+    #[arg(short, long, global = true, env = "KSCOPE_NAMESPACE")]
     pub namespace: Option<String>,
 
     /// Watch every namespace the credentials allow.
-    #[arg(short = 'A', long, conflicts_with = "namespace")]
+    #[arg(short = 'A', long, global = true, conflicts_with = "namespace")]
     pub all_namespaces: bool,
 
     /// kubeconfig context to use.
-    #[arg(long, env = "KSCOPE_CONTEXT")]
+    #[arg(long, global = true, env = "KSCOPE_CONTEXT")]
     pub context: Option<String>,
 
     /// Browse several contexts as one: a fleet name from the config file, or
-    /// comma-separated context globs (`stg-*,qa-eu`). Rows from every member
-    /// are listed together, tagged with their context.
-    #[arg(long, value_name = "NAME|GLOBS", env = "KSCOPE_FLEET")]
+    /// comma-separated context patterns. `stg` alone means every context
+    /// whose name contains "stg"; `stg-*,qa-eu` are globs. Rows from every
+    /// member are listed together, tagged with their context.
+    #[arg(
+        short = 'u',
+        long,
+        global = true,
+        value_name = "FLEET",
+        env = "KSCOPE_FLEET"
+    )]
     pub fleet: Option<String>,
 
     /// Resource type to start on (`deploy`, `svc`, a CRD plural…). Also the
@@ -39,11 +50,11 @@ pub struct Cli {
 
     /// Label selector, e.g. `app=api,tier!=batch`. Narrows both the browsed
     /// list and the pods a workload's logs are collected from.
-    #[arg(short = 'l', long, value_name = "SELECTOR")]
+    #[arg(short = 'l', long, global = true, value_name = "SELECTOR")]
     pub selector: Option<String>,
 
     /// Path to a kscope config file.
-    #[arg(short, long, value_name = "FILE", env = "KSCOPE_CONFIG")]
+    #[arg(short, long, global = true, value_name = "FILE", env = "KSCOPE_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Historical lines to request when attaching. 0 (the default) means the
@@ -78,7 +89,33 @@ pub struct Cli {
     pub log_file: Option<PathBuf>,
 }
 
+/// Non-interactive commands. Without one, kscope starts the TUI.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// List objects of a kind, kubectl-style, across a fleet with `-u`:
+    /// `kscope get pods -u stg`, `kscope get deploy checkout -u prod`.
+    /// Spans every namespace unless `-n` is given.
+    Get {
+        /// Resource type: `pods`, `deploy`, `sts`, `svc`, a CRD plural…
+        kind: String,
+        /// Only objects whose name or namespace contains this.
+        name: Option<String>,
+    },
+}
+
 impl Cli {
+    /// What to search for without starting the TUI: `(kind, text, exit 1
+    /// when nothing matches)`. `get` behaves like kubectl and exits 0 on an
+    /// empty result; `--find` behaves like grep.
+    pub fn search(&self) -> Option<(String, String, bool)> {
+        if let Some(Command::Get { kind, name }) = &self.command {
+            return Some((kind.clone(), name.clone().unwrap_or_default(), false));
+        }
+        let text = self.find.clone()?;
+        let kind = self.kind.clone().unwrap_or_else(|| "pods".to_string());
+        Some((kind, text, true))
+    }
+
     /// Split a `--dump pod:container` argument.
     pub fn dump_target(&self) -> Option<(String, Option<String>)> {
         self.dump.as_ref().map(|raw| match raw.split_once(':') {
@@ -107,6 +144,27 @@ mod tests {
         );
         let cli = Cli::parse_from(["kscope", "--dump", "api-0"]);
         assert_eq!(cli.dump_target(), Some(("api-0".into(), None)));
+    }
+
+    #[test]
+    fn parses_get_with_a_fleet_either_side() {
+        for argv in [
+            &["kscope", "get", "pods", "-u", "stg"][..],
+            &["kscope", "-u", "stg", "get", "pods"][..],
+        ] {
+            let cli = Cli::parse_from(argv);
+            assert_eq!(cli.fleet.as_deref(), Some("stg"));
+            assert_eq!(cli.search(), Some(("pods".into(), String::new(), false)));
+        }
+        let cli = Cli::parse_from([
+            "kscope", "get", "deploy", "checkout", "-u", "prod", "-n", "shop",
+        ]);
+        assert_eq!(
+            cli.search(),
+            Some(("deploy".into(), "checkout".into(), false))
+        );
+        assert_eq!(cli.namespace.as_deref(), Some("shop"));
+        assert_eq!(Cli::parse_from(["kscope"]).search(), None);
     }
 
     #[test]
