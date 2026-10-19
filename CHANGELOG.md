@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- README: the config file lives in the platform's config directory, which
+  on macOS is `~/Library/Application Support/io.kscope.kscope/`, not
+  `~/.config/kscope/`.
+
 ## [1.3.1] - 2026-10-19
 
 ### Changed
