@@ -115,8 +115,7 @@ pub async fn poll(client: &kube::Client, scope: &Scope) -> Result<MetricsSnapsho
 
     let (pods_res, nodes_res) = tokio::join!(pods_api.list(&lp), nodes_api.list(&lp));
 
-    let pod_list = pods_res
-        .map_err(|e| anyhow!("metrics.k8s.io unavailable ({e}); is metrics-server installed?"))?;
+    let pod_list = pods_res.map_err(|e| anyhow!(unavailable_reason(&e)))?;
 
     let mut pods = Vec::with_capacity(pod_list.items.len());
     for item in pod_list.items {
@@ -132,6 +131,24 @@ pub async fn poll(client: &kube::Client, scope: &Scope) -> Result<MetricsSnapsho
     };
 
     Ok(MetricsSnapshot { pods, nodes })
+}
+
+/// Say why there are no metrics in words that point at the fix. The raw
+/// error for a missing metrics-server is a 404 whose body fails to parse,
+/// which buries the one useful fact at the end of a long line.
+fn unavailable_reason(err: &kube::Error) -> String {
+    match err {
+        kube::Error::Api(status) => match status.code {
+            404 => "no metrics: metrics-server is not installed (metrics.k8s.io not served)".into(),
+            403 => "no metrics: not allowed to list metrics.k8s.io".into(),
+            503 => "no metrics: metrics-server is installed but not ready (503)".into(),
+            code => format!(
+                "no metrics: metrics.k8s.io answered {code}: {}",
+                status.message.trim()
+            ),
+        },
+        other => format!("no metrics: metrics.k8s.io unreachable ({other})"),
+    }
 }
 
 fn decode_pod(obj: &DynamicObject) -> Option<PodSample> {
@@ -169,6 +186,21 @@ fn decode_node(obj: &DynamicObject) -> Option<NodeSample> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explains_a_missing_metrics_server() {
+        let status = |code: u16| {
+            kube::Error::Api(Box::new(kube::core::Status {
+                code,
+                message: "404 page not found".into(),
+                ..Default::default()
+            }))
+        };
+        assert!(super::unavailable_reason(&status(404)).contains("not installed"));
+        assert!(super::unavailable_reason(&status(403)).contains("not allowed"));
+        assert!(super::unavailable_reason(&status(503)).contains("not ready"));
+        assert!(super::unavailable_reason(&status(500)).contains("500"));
+    }
+
     use super::*;
     use kube::core::DynamicObject;
 
