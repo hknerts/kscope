@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The header shows what kscope can do and what is live, in the same five
+  rows. A strip of capability chips (logs, metrics, events, describe, fleet,
+  triage) lights up for whatever is on screen, next to a permanent read-only
+  mark. Cluster CPU and memory are gauges coloured by the metrics thresholds,
+  and a counts line shows items, how many are in trouble, warning events and
+  nodes. The context's dot turns green once the apiserver has answered. The
+  logo is a pair of binoculars with glass lenses rather than spectacles. On
+  a narrow terminal, chips and shortcut columns that do not fit whole are
+  left out instead of being cut mid-word.
+
 - A cluster without metrics-server now says so in plain words ("no metrics:
   metrics-server is not installed") instead of a raw, truncated 404 parse
   error. A 403 and a 503 are explained the same way.

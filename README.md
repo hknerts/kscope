@@ -243,9 +243,12 @@ staging = ["stg-*"]                  # globs over kubeconfig context names
 prod    = ["prod-eu-*", "prod-us-1"]
 ```
 
-Configured fleets appear at the top of the contexts pane, marked `◇`.
-`Enter` on one (or `kscope -u staging`) lists the current kind on **every
-member at once**, with a `context` column:
+Fleets defined under `[fleets]` appear at the top of the contexts pane, marked
+`◇`. **Only those fleets are listed there.** kscope does not invent groups
+from context names. With no `[fleets]` section the pane lists only contexts,
+and a fleet is opened with `-u stg` or with `/` on the pane.
+`Enter` on a fleet (or `kscope -u staging`) lists the current kind on **every
+member at once**, with a `context` column. With the config above:
 
 ```
 ┌─ contexts ─────┐┌─ pods /checkout/ · all · fleet staging ─────────────────┐
@@ -270,7 +273,7 @@ member at once**, with a `context` column:
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
 `Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to
 answer. An unreachable cluster is reported in the status bar and the header
-(`fleet:staging 4/5`). It never blocks the rest. kscope starts on your current context
+(`◆ staging 4/5`). It never blocks the rest. kscope starts on your current context
 if it is a member, otherwise on the first member that answers.
 
 Without the TUI, `kscope get KIND [NAME] -u FLEET` prints the matches and
