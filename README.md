@@ -237,7 +237,7 @@ context only when a context has exactly that name. `stg-*,qa-eu` are globs.
 To give a set a name of its own, put it in the config:
 
 ```toml
-# ~/.config/kscope/config.toml
+# config.toml (see Configuration for where it lives)
 [fleets]
 staging = ["stg-*"]                  # globs over kubeconfig context names
 prod    = ["prod-eu-*", "prod-us-1"]
@@ -332,8 +332,16 @@ tail_lines = 5000       # only fetch the last 5000 lines on attach
 
 ## Configuration
 
-kscope runs with zero configuration. To customise it, drop a file at
-`~/.config/kscope/config.toml` (see [`examples/config.toml`](examples/config.toml)):
+kscope runs with zero configuration. To customise it, drop a `config.toml`
+(see [`examples/config.toml`](examples/config.toml)) in the platform's config
+directory, or pass `-c FILE` / set `KSCOPE_CONFIG`:
+
+| OS | Path |
+| --- | --- |
+| Linux | `~/.config/kscope/config.toml` (or `$XDG_CONFIG_HOME/kscope/`) |
+| macOS | `~/Library/Application Support/io.kscope.kscope/config.toml` |
+| Windows | `%APPDATA%\kscope\kscope\config\config.toml` |
+
 
 ```toml
 [general]
