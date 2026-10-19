@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A cluster without metrics-server now says so in plain words ("no metrics:
+  metrics-server is not installed") instead of a raw, truncated 404 parse
+  error. A 403 and a 503 are explained the same way.
+
 ## [1.3.0] - 2026-10-19
 
 ### Added
