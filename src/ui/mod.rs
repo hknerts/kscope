@@ -14,7 +14,7 @@ mod metrics;
 mod resources;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
@@ -166,20 +166,27 @@ fn draw_completions(f: &mut Frame, app: &App, body: Rect) {
     );
 }
 
-/// The kscope wordmark as a small binoculars glyph — five rows so it has
-/// room to breathe next to the identity block and the shortcut strip.
-const ICON: [&str; 5] = [
-    "  ___     ___  ",
-    " /   \\===/   \\ ",
-    "|  o  | |  o  |",
-    " \\___/   \\___/ ",
-    "    kscope     ",
+/// The kscope mark: a pair of binoculars seen from the front — eyecups on
+/// top, the hinge between the barrels, and two large objective lenses. Each
+/// row pairs the glyphs with a paint mask: `b` body, `g` glass (the lens
+/// interior, drawn as a background so half-blocks blend into it), `w` the
+/// glint on the glass, and a space for nothing.
+const ICON: [(&str, &str); 5] = [
+    ("   ▄▄▄     ▄▄▄   ", "   bbb     bbb   "),
+    ("  ▐███▙▄▄▄▟███▌  ", "  bbbbbbbbbbbbb  "),
+    (" ▟█▀▀▀█▙ ▟█▀▀▀█▙ ", " bbgggbb bbgggbb "),
+    (" █▌ ◜ ▐█ █▌ ◜ ▐█ ", " bbgwgbb bbgwgbb "),
+    (" ▜█▄▄▄█▛ ▜█▄▄▄█▛ ", " bbgggbb bbgggbb "),
 ];
 const ICON_WIDTH: u16 = 17;
+/// Deep teal for the lens glass, and a bright highlight for its glint.
+const GLASS: Color = Color::Rgb(0x10, 0x4e, 0x63);
+const GLINT: Color = Color::Rgb(0xe8, 0xfc, 0xff);
 
-/// Header: a five-row "pro" bar — identity (context/version/user) on the
-/// left, the context-sensitive keybinding cheat sheet in the middle, and the
-/// kscope binoculars glyph on the right.
+/// Header: five rows, same height as ever. Identity and live cluster gauges
+/// on the left; in the middle a strip of what kscope can do, lit up for what
+/// is on screen right now, over the keys that apply here; the binoculars on
+/// the right.
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     let block = Block::default()
@@ -200,8 +207,46 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     draw_identity(f, app, cols[0]);
-    draw_shortcuts(f, app, cols[2]);
+    let middle = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(cols[2]);
+    draw_capabilities(f, app, middle[0]);
+    draw_shortcuts(f, app, middle[1]);
     draw_icon(f, app, cols[4]);
+}
+
+/// `███░░░░░`, coloured by the same thresholds as the metrics view.
+fn gauge(app: &App, label: &'static str, percent: Option<f64>) -> Vec<Span<'static>> {
+    let theme = &app.config.theme;
+    let dim = Style::default().fg(Theme::color(&theme.trace));
+    const CELLS: usize = 8;
+    let Some(percent) = percent else {
+        return vec![
+            Span::styled(format!("{label} "), dim),
+            Span::styled("░".repeat(CELLS), dim),
+            Span::styled("   – ", dim),
+        ];
+    };
+    let filled = ((percent / 100.0) * CELLS as f64)
+        .round()
+        .clamp(0.0, CELLS as f64) as usize;
+    let color = if percent >= app.config.metrics.critical_pct {
+        theme.error()
+    } else if percent >= app.config.metrics.warn_pct {
+        theme.warn()
+    } else {
+        Theme::color(&theme.info)
+    };
+    vec![
+        Span::styled(format!("{label} "), dim),
+        Span::styled("█".repeat(filled), Style::default().fg(color)),
+        Span::styled("░".repeat(CELLS - filled), dim),
+        Span::styled(
+            format!("{:>4} ", format!("{percent:.0}%")),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+    ]
 }
 
 fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
@@ -211,91 +256,223 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Theme::color(&theme.trace));
     let fg = Style::default().fg(Theme::color(&theme.fg));
+    let badge = Style::default()
+        .bg(theme.accent())
+        .fg(Theme::color(&theme.match_fg))
+        .add_modifier(Modifier::BOLD);
+
+    // Title: the wordmark as a badge, then what is being browsed and how it
+    // is narrowed.
+    let mut title = vec![
+        Span::raw(" "),
+        Span::styled(" kscope ", badge),
+        Span::styled(format!(" :{} ", app.resource_label()), accent),
+    ];
+    if let Some(fleet) = &app.fleet {
+        let answered = fleet.members.len() - app.fleet_failed.len();
+        let style = if app.fleet_failed.is_empty() {
+            accent
+        } else {
+            Style::default()
+                .fg(theme.warn())
+                .add_modifier(Modifier::BOLD)
+        };
+        title.push(Span::styled(
+            format!(
+                "◆ {} {answered}/{} ",
+                truncate(&fleet.name, 14),
+                fleet.members.len()
+            ),
+            style,
+        ));
+    }
+    if app.problems_only {
+        title.push(Span::styled(
+            "! problems ",
+            Style::default().fg(theme.error()),
+        ));
+    }
+    if !app.selector_text.is_empty() {
+        title.push(Span::styled(
+            format!("-l {} ", truncate(&app.selector_text, 14)),
+            dim,
+        ));
+    }
+
+    // The dot says whether the apiserver has answered: green once it has
+    // reported a version, amber while connecting, red when it never did.
+    let health = match app.k8s_version.as_str() {
+        "…" | "" => Style::default().fg(theme.warn()),
+        "unknown" => Style::default().fg(theme.error()),
+        _ => Style::default().fg(Theme::color(&theme.info)),
+    };
+    let context = Line::from(vec![
+        Span::styled(" ● ", health),
+        Span::styled(
+            truncate(&app.context_name, 26),
+            fg.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {}", app.k8s_version), dim),
+    ]);
+    let who = Line::from(vec![
+        Span::styled("   user ", dim),
+        Span::styled(
+            truncate(
+                if app.user_name.is_empty() {
+                    "-"
+                } else {
+                    &app.user_name
+                },
+                16,
+            ),
+            fg,
+        ),
+        Span::styled("  ns ", dim),
+        Span::styled(truncate(app.scope.label(), 12), fg),
+    ]);
 
     let (cpu_used, cpu_cap, mem_used, mem_cap) = app.metrics.cluster_totals();
-    let field = |label: &'static str, value: &str| {
-        let value = if value.is_empty() { "-" } else { value }.to_string();
-        Line::from(vec![
-            Span::styled(format!(" {label:<8}", label = label), dim),
-            Span::styled(value, fg),
-        ])
-    };
+    let have = app.metrics.error.is_none() && cpu_cap > 0.0;
+    let mut gauges = vec![Span::raw("   ")];
+    gauges.extend(gauge(
+        app,
+        "cpu",
+        have.then(|| crate::metrics::pct(cpu_used, cpu_cap)),
+    ));
+    gauges.push(Span::raw(" "));
+    gauges.extend(gauge(
+        app,
+        "mem",
+        have.then(|| crate::metrics::pct(mem_used, mem_cap)),
+    ));
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(" kscope ", accent),
-            Span::styled(format!(":{} ", app.resource_label()), fg),
-            // In a fleet the connected context is only where logs, metrics
-            // and describe come from; say which fleet the list spans, and
-            // how many of its members answered.
-            match &app.fleet {
-                Some(fleet) => Span::styled(
-                    format!(
-                        "fleet:{} {}/{} ",
-                        truncate(&fleet.name, 20),
-                        fleet.members.len() - app.fleet_failed.len(),
-                        fleet.members.len()
-                    ),
-                    if app.fleet_failed.is_empty() {
-                        accent
-                    } else {
-                        Style::default().fg(theme.warn())
-                    },
-                ),
-                None => Span::raw(""),
-            },
-            if app.problems_only {
-                Span::styled("problems ", Style::default().fg(theme.error()))
+    let warnings = app.events.iter().filter(|e| e.type_ == "Warning").count();
+    let troubled = app.rows.iter().filter(|r| r.unhealthy).count();
+    let counts = Line::from(vec![
+        Span::styled("   ", dim),
+        Span::styled(app.rows.len().to_string(), fg.add_modifier(Modifier::BOLD)),
+        Span::styled(" items · ", dim),
+        Span::styled(
+            troubled.to_string(),
+            if troubled > 0 {
+                Style::default()
+                    .fg(theme.error())
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Span::raw("")
+                fg
             },
-            if app.selector_text.is_empty() {
-                Span::raw("")
+        ),
+        Span::styled(" trouble · ", dim),
+        Span::styled(
+            warnings.to_string(),
+            if warnings > 0 {
+                Style::default()
+                    .fg(theme.warn())
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Span::styled(format!("-l {} ", truncate(&app.selector_text, 20)), dim)
+                fg
             },
-        ]),
-        field("context", &app.context_name),
-        field("k8s", &app.k8s_version),
-        field("user", &app.user_name),
-        Line::from(vec![
-            Span::styled(" ns:", dim),
-            Span::styled(truncate(app.scope.label(), 10), fg),
-            Span::styled("  items:", dim),
-            Span::styled(app.rows.len().to_string(), fg),
-            Span::styled("  nodes:", dim),
-            Span::styled(app.inventory.nodes.len().to_string(), fg),
-            Span::styled("  cpu:", dim),
-            Span::styled(
-                format!("{:.0}%", crate::metrics::pct(cpu_used, cpu_cap)),
-                fg,
-            ),
-            Span::styled(" mem:", dim),
-            Span::styled(
-                format!("{:.0}%", crate::metrics::pct(mem_used, mem_cap)),
-                fg,
-            ),
-        ]),
-    ];
+        ),
+        Span::styled(" warn · ", dim),
+        Span::styled(app.inventory.nodes.len().to_string(), fg),
+        Span::styled(" nodes", dim),
+    ]);
+
+    let lines = vec![Line::from(title), context, who, Line::from(gauges), counts];
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_icon(f: &mut Frame, app: &App, area: Rect) {
+/// One chip per thing kscope does, lit when it is what you are looking at:
+/// the open tab, the describe overlay, a fleet, the triage filter.
+fn draw_capabilities(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
-    let accent = Style::default().fg(theme.accent());
+    let detail = app.right == RightMode::Detail;
+    let chips: [(&str, &str, bool); 6] = [
+        (
+            "l",
+            "logs",
+            detail && app.view == View::Logs && !app.describe_open,
+        ),
+        (
+            "m",
+            "metrics",
+            detail && app.view == View::Metrics && !app.describe_open,
+        ),
+        (
+            "E",
+            "events",
+            detail && app.view == View::Events && !app.describe_open,
+        ),
+        ("d", "describe", app.describe_open),
+        ("◆", "fleet", app.fleet.is_some()),
+        ("!", "triage", app.problems_only),
+    ];
+    let on = Style::default()
+        .bg(theme.accent())
+        .fg(Theme::color(&theme.match_fg))
+        .add_modifier(Modifier::BOLD);
+    let off_key = Style::default().fg(theme.accent());
+    let off = Style::default().fg(Theme::color(&theme.fg));
     let dim = Style::default().fg(Theme::color(&theme.trace));
+
+    // Whole chips only: one that would be cut at the edge is left out. The
+    // read-only promise goes last, and only when there is room for it.
+    let promise = "   ⊘ read-only";
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (key, name, active) in chips {
+        let width = key.chars().count() + name.chars().count() + 3 + usize::from(used > 0);
+        if used + width > area.width as usize {
+            break;
+        }
+        if used > 0 {
+            spans.push(Span::styled("│", dim));
+        }
+        if active {
+            spans.push(Span::styled(format!(" {key} {name} "), on));
+        } else {
+            spans.push(Span::styled(format!(" {key} "), off_key));
+            spans.push(Span::styled(format!("{name} "), off));
+        }
+        used += width;
+    }
+    if used + promise.chars().count() <= area.width as usize {
+        spans.push(Span::styled(
+            promise,
+            Style::default().fg(Theme::color(&theme.info)),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_icon(f: &mut Frame, app: &App, area: Rect) {
+    let body = Style::default().fg(app.config.theme.accent());
     let lines: Vec<Line> = ICON
         .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            Line::from(Span::styled(
-                *row,
-                if i == ICON.len() - 1 {
-                    dim.add_modifier(Modifier::BOLD)
-                } else {
-                    accent
-                },
-            ))
+        .map(|(glyphs, mask)| {
+            Line::from(
+                glyphs
+                    .chars()
+                    .zip(mask.chars())
+                    .map(|(c, m)| {
+                        let style = match m {
+                            // Half-blocks on the rim: body colour on glass.
+                            'b' => body.bg(if matches!(c, '▀' | '▄') {
+                                GLASS
+                            } else {
+                                Color::Reset
+                            }),
+                            'g' => body.bg(GLASS),
+                            'w' => Style::default()
+                                .fg(GLINT)
+                                .bg(GLASS)
+                                .add_modifier(Modifier::BOLD),
+                            _ => Style::default(),
+                        };
+                        Span::styled(c.to_string(), style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect();
     f.render_widget(Paragraph::new(lines), area);
@@ -330,7 +507,7 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
             bindings.push(("Ctrl-r", "refresh"));
         }
         (Pane::Resources, RightMode::Detail) => {
-            bindings.push(("l/m/E", "logs/monitoring/events"));
+            bindings.push(("l/m/E", "switch tab"));
             bindings.push(("d", "describe"));
             bindings.push(("Esc", "back to list"));
             match app.view {
@@ -361,6 +538,15 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
     const COL_WIDTH: u16 = 21;
     const GUTTER: u16 = 2;
     let rows = (area.height as usize).max(1);
+    // On a narrow terminal, show the columns that fit whole rather than
+    // squeezing every column until keys read "En" and "Ct". `?` and `q` are
+    // kept: help lists everything that had to go.
+    let fit = ((area.width + GUTTER) / (COL_WIDTH + GUTTER)).max(1) as usize;
+    if bindings.len() > fit * rows {
+        let tail = bindings.split_off(bindings.len() - 2);
+        bindings.truncate(fit * rows - tail.len());
+        bindings.extend(tail);
+    }
     let col_count = bindings.len().div_ceil(rows);
     let mut constraints = Vec::with_capacity(col_count * 2);
     for i in 0..col_count {
