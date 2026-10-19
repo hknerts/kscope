@@ -66,6 +66,11 @@ one screen:
   the real container state rather than the phase: a pod stuck in
   `CrashLoopBackOff` still reports phase `Running`, and that is exactly the one
   you need to find.
+* **Fleets** — an environment is rarely one cluster. Group contexts into a
+  fleet (`staging = ["stg-*"]`) and every listing spans all of them at once,
+  tagged with the cluster each row came from. Filter, triage and open as
+  usual: `Enter` on a row from another cluster switches there and opens it.
+  See [Fleets: many clusters as one](#fleets-many-clusters-as-one).
 
 ## kscope or k9s?
 
@@ -124,6 +129,8 @@ kscope --tail 2000            # only the last 2000 log lines instead of everythi
 kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
 kscope --since 3600           # only lines from the last hour
 kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
+kscope --fleet staging                      # every staging cluster as one list
+kscope --fleet 'stg-*' -k deploy --find checkout   # search them and print, for scripts
 ```
 
 ## Key bindings
@@ -170,7 +177,9 @@ kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 
 | Key | Action |
 | --- | --- |
-| `Enter` | switch to that cluster |
+| `Enter` | on a context: switch to that cluster (and leave any fleet) |
+| `Enter` | on a fleet (`◇`): list every member at once |
+| `/` | browse an ad-hoc fleet: context globs, e.g. `stg-*,qa-eu` |
 
 ### Detail — `l` logs
 
@@ -210,6 +219,61 @@ without reading it — even when kscope runs with a token that could. Set
 > CRD through its `spec.selector`, a Namespace or Node through everything running
 > there. Kinds with nothing behind them (a ConfigMap, say) say so. `logs.max_streams`
 > caps how many containers are streamed at once — see [Configuration](#configuration).
+
+## Fleets: many clusters as one
+
+Say staging is five clusters and you want to know where `checkout` is running,
+or which of them has a pod in trouble. Name the set once:
+
+```toml
+# ~/.config/kscope/config.toml
+[fleets]
+staging = ["stg-*"]                  # globs over kubeconfig context names
+prod    = ["prod-eu-*", "prod-us-1"]
+```
+
+Configured fleets appear at the top of the contexts pane, marked `◇`.
+`Enter` on one (or `kscope --fleet staging`) lists the current kind on **every
+member at once**, with a `context` column:
+
+```
+┌─ contexts ─────┐┌─ pods /checkout/ · all · fleet staging ─────────────────┐
+│◇ prod ×2       ││context      namespace  name                   status    │
+│◆ staging ×5    ││stg-eu-1     shop       checkout-b9d96-nfps9   Running   │
+│  prod-eu-1     ││stg-eu-1     shop       checkout-canary        Running   │
+│· stg-eu-1      ││stg-us-2     shop       checkout-84757-ffk7f   Running   │
+│● stg-us-2      ││stg-us-2     shop       payments-broken        CrashLoop │
+└────────────────┘└─────────────────────────────────────────────────────────┘
+```
+
+* **Search**: `/` filters by name, namespace *or* context across every member;
+  `:deploy`, `!` and `L` work exactly as on one cluster.
+* **Open**: `Enter`, `l`, `m`, `E` or `d` on a row from another cluster
+  switches kscope to that cluster and opens the object there — logs,
+  monitoring, events and describe always come from the cluster the row lives
+  on. `Esc` brings you back to the fleet-wide list, still filtered.
+* **Ad hoc**: no config needed. `/` on the contexts pane takes globs
+  (`stg-*,qa-eu`), and so does `--fleet`.
+* **Leave**: pick a single context in the pane.
+
+A fleet lists across all namespaces unless `-n` is given (narrow it later with
+`Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to
+answer. An unreachable cluster is reported in the status bar and the header
+(`fleet:staging 4/5`). It never blocks the rest. kscope starts on your current context
+if it is a member, otherwise on the first member that answers.
+
+For scripts, `--find` prints the matches and exits (status 1 when there are
+none, like `grep`):
+
+```console
+$ kscope --fleet staging -k deploy --find checkout
+CONTEXT   NAMESPACE  NAME      STATUS  AGE
+stg-eu-1  shop       checkout  2/2     8m
+stg-us-2  shop       checkout  2/2     8m
+```
+
+Every member uses the credentials of its own kubeconfig context, and the
+[read-only guarantee](#permissions) holds for each of them.
 
 ## How far back can I scroll?
 
@@ -259,6 +323,9 @@ max_fps = 30
 
 [describe]
 show_secret_values = false   # Secrets render as <redacted, N bytes>
+
+[fleets]                     # contexts browsed as one, by glob
+staging = ["stg-*"]
 
 [logs]
 buffer_lines = 0     # 0 = unlimited (default): never evict

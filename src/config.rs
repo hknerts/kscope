@@ -17,6 +17,9 @@ pub struct Config {
     pub logs: LogsConfig,
     pub metrics: MetricsConfig,
     pub describe: DescribeConfig,
+    /// Named sets of contexts browsed as one, e.g.
+    /// `staging = ["stg-*", "qa-eu"]`. Values are globs over context names.
+    pub fleets: std::collections::BTreeMap<String, Vec<String>>,
     pub theme: Theme,
     /// Extra user-defined regex highlight rules, applied after the built-ins.
     pub highlight: Vec<HighlightRule>,
@@ -280,6 +283,16 @@ mod tests {
         assert_eq!(c.logs.buffer_lines, 10);
         // untouched section keeps its default
         assert_eq!(c.metrics.history, MetricsConfig::default().history);
+    }
+
+    #[test]
+    fn parses_fleets() {
+        let c: Config =
+            toml::from_str("[fleets]\nstaging = [\"stg-*\"]\nprod = [\"prod-eu\", \"prod-us\"]\n")
+                .unwrap();
+        assert_eq!(c.fleets["staging"], vec!["stg-*"]);
+        assert_eq!(c.fleets["prod"].len(), 2);
+        assert!(Config::default().fleets.is_empty());
     }
 
     #[test]

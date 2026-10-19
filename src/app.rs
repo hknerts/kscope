@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Sender;
 use crate::config::Config;
 use crate::k8s::discovery::{Scope, Update};
 use crate::k8s::events::{EventInfo, EventUpdate};
+use crate::k8s::fleet::{Fleet, Listing};
 use crate::k8s::logs::{LogEvent, StreamSpec};
 use crate::k8s::metrics::MetricsEvent;
 use crate::k8s::resources::{ResourceRow, ResourceType};
@@ -67,6 +68,8 @@ pub enum InputMode {
     Command,
     /// `-l` label selector entry.
     Selector,
+    /// Context globs for an ad-hoc fleet, typed on the contexts pane.
+    Fleet,
     Help,
 }
 
@@ -79,6 +82,7 @@ impl InputMode {
             InputMode::RowFilter => "matching > ",
             InputMode::Command => ":",
             InputMode::Selector => "selector (k=v,k2!=v2) > ",
+            InputMode::Fleet => "fleet (name or globs, e.g. stg-*,qa-eu) > ",
             _ => "",
         }
     }
@@ -151,6 +155,22 @@ pub enum MetricPane {
     Volumes,
 }
 
+/// What to open once a context switch requested from a fleet row lands.
+#[derive(Debug, Clone)]
+struct PendingOpen {
+    /// [`ResourceRow::identity`] of the row.
+    identity: String,
+    /// The detail tab to open, or `None` to stay in the list.
+    view: Option<View>,
+    describe: bool,
+}
+
+/// One entry of the contexts pane: configured fleets first, then contexts.
+pub enum PaneEntry<'a> {
+    Fleet(&'a Fleet),
+    Context(&'a ContextEntry),
+}
+
 /// A kubeconfig context in the left-hand pane.
 #[derive(Debug, Clone)]
 pub struct ContextEntry {
@@ -174,6 +194,18 @@ pub struct App {
     /// Set when the user picks a different context; the main loop notices,
     /// rebuilds the client and restarts every poller.
     pub pending_context: Option<String>,
+    /// Fleets from the config file that match at least one context, listed
+    /// above the contexts.
+    pub fleets: Vec<Fleet>,
+    /// The fleet being browsed, if any: the list then spans every member,
+    /// while logs, metrics and describe still talk to the one connected
+    /// context, switching to a row's context when it is opened.
+    pub fleet: Option<Fleet>,
+    /// Members that did not answer the last fleet listing.
+    pub fleet_failed: Vec<(String, String)>,
+    pending_open: Option<PendingOpen>,
+    /// `--kind`: the type to land on once discovery has answered.
+    pub start_kind: Option<String>,
     /// Set when the namespace scope changes: the pollers are bound to a scope
     /// at spawn time, so they have to be restarted to follow it.
     pub pollers_stale: bool,
@@ -292,10 +324,13 @@ impl App {
         let highlighter = Highlighter::new(&config.theme, &config.highlight);
         let buffer = LogBuffer::new(config.logs.buffer_lines);
         let metrics = MetricsStore::new(config.metrics.history);
-        let context_selected = contexts
-            .iter()
-            .position(|c| c.name == context_name)
-            .unwrap_or(0);
+        let names: Vec<String> = contexts.iter().map(|c| c.name.clone()).collect();
+        let fleets = Fleet::all_configured(&config.fleets, &names);
+        let context_selected = fleets.len()
+            + contexts
+                .iter()
+                .position(|c| c.name == context_name)
+                .unwrap_or(0);
         Self {
             follow: config.logs.follow,
             wrap: config.logs.wrap,
@@ -310,6 +345,11 @@ impl App {
             contexts,
             context_selected,
             pending_context: None,
+            fleets,
+            fleet: None,
+            fleet_failed: Vec::new(),
+            pending_open: None,
+            start_kind: None,
             pollers_stale: false,
             resource_types: Vec::new(),
             current_type: None,
@@ -394,6 +434,9 @@ impl App {
         self.current_type = previous
             .and_then(|q| self.resource_types.iter().position(|t| t.qualified() == q))
             .or_else(|| self.resource_types.iter().position(|t| t.name() == "pods"));
+        if let Some(kind) = self.start_kind.take() {
+            self.set_resource_type(&kind);
+        }
         self.dirty = true;
     }
 
@@ -406,6 +449,32 @@ impl App {
         self.current_type()
             .map(|t| t.name())
             .unwrap_or_else(|| "—".to_string())
+    }
+
+    /// Take a listing: one context's rows, or a fleet's with the members that
+    /// failed. A fleet only errors out when no member answered at all.
+    pub fn on_listing(&mut self, listing: Result<Listing, String>) {
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(err) => return self.on_rows(Err(err)),
+        };
+        self.fleet_failed = listing.failed;
+        let members = self.fleet.as_ref().map_or(1, |f| f.members.len());
+        if !self.fleet_failed.is_empty() && self.fleet_failed.len() == members {
+            let (context, err) = &self.fleet_failed[0];
+            return self.on_rows(Err(format!("no fleet member answered ({context}: {err})")));
+        }
+        self.on_rows(Ok(listing.rows));
+        if let Some((context, err)) = self.fleet_failed.first() {
+            let more = match self.fleet_failed.len() {
+                1 => String::new(),
+                n => format!(" (+{} more)", n - 1),
+            };
+            self.set_status(
+                format!("{context} unreachable{more}: {err}"),
+                StatusKind::Warn,
+            );
+        }
     }
 
     /// Replace the browsed object list.
@@ -428,7 +497,7 @@ impl App {
     }
 
     fn rebuild_row_view(&mut self) {
-        let previous = self.selected_row().map(|r| r.key());
+        let previous = self.selected_row().map(|r| r.identity());
         let needle = self.row_filter.as_deref().map(str::to_ascii_lowercase);
         self.row_view = self
             .rows
@@ -440,6 +509,7 @@ impl App {
                 Some(n) => {
                     r.name.to_ascii_lowercase().contains(n)
                         || r.namespace.to_ascii_lowercase().contains(n)
+                        || r.context.to_ascii_lowercase().contains(n)
                 }
             })
             .map(|(i, _)| i)
@@ -449,7 +519,7 @@ impl App {
             .and_then(|key| {
                 self.row_view
                     .iter()
-                    .position(|&i| self.rows[i].key() == key)
+                    .position(|&i| self.rows[i].identity() == key)
             })
             .unwrap_or(0);
         self.row_selected = self.row_selected.min(self.row_view.len().saturating_sub(1));
@@ -463,6 +533,38 @@ impl App {
     pub fn selected_row(&self) -> Option<&ResourceRow> {
         let &index = self.row_view.get(self.row_selected)?;
         self.rows.get(index)
+    }
+
+    /// The selected row's context when it is not the connected one. Nothing
+    /// may be fetched for such a row until kscope has switched to it.
+    pub fn remote_context(&self) -> Option<&str> {
+        let row = self.selected_row()?;
+        (!row.context.is_empty() && row.context != self.context_name)
+            .then_some(row.context.as_str())
+    }
+
+    /// Opening a row that lives on another member: switch there first and
+    /// finish the job in [`App::adopt_context`]. Returns false when the row
+    /// is local and the caller should go ahead.
+    fn open_remote(&mut self, view: Option<View>, describe: bool) -> bool {
+        let Some(context) = self.remote_context().map(str::to_string) else {
+            return false;
+        };
+        let Some(row) = self.selected_row() else {
+            return false;
+        };
+        let (identity, key) = (row.identity(), row.key());
+        self.pending_open = Some(PendingOpen {
+            identity,
+            view,
+            describe,
+        });
+        self.set_status(
+            format!("switching to {context} for {key}…"),
+            StatusKind::Info,
+        );
+        self.pending_context = Some(context);
+        true
     }
 
     /// The selected object as a pod, when the browsed kind *is* pods. Logs and
@@ -511,17 +613,87 @@ impl App {
 
     // -------------------------------------------------------------- contexts
 
+    /// Fleets, then contexts: what the left-hand pane lists, in order.
+    pub fn pane_entries(&self) -> impl Iterator<Item = PaneEntry<'_>> {
+        self.fleets
+            .iter()
+            .map(PaneEntry::Fleet)
+            .chain(self.contexts.iter().map(PaneEntry::Context))
+    }
+
+    pub fn pane_len(&self) -> usize {
+        self.fleets.len() + self.contexts.len()
+    }
+
     fn switch_context(&mut self) {
-        let Some(entry) = self.contexts.get(self.context_selected) else {
+        let index = self.context_selected;
+        if let Some(fleet) = self.fleets.get(index) {
+            let fleet = fleet.clone();
+            return self.enter_fleet(fleet);
+        }
+        let Some(entry) = self.contexts.get(index - self.fleets.len()) else {
             return;
         };
-        if entry.name == self.context_name {
-            self.set_status(format!("already on {}", entry.name), StatusKind::Info);
+        let name = entry.name.clone();
+        // Picking a single context is how you leave a fleet.
+        let left_fleet = self.fleet.take().is_some();
+        if name == self.context_name {
+            if left_fleet {
+                self.reset_rows();
+                self.request_rows();
+                self.set_status(format!("left the fleet, browsing {name}"), StatusKind::Info);
+            } else {
+                self.set_status(format!("already on {name}"), StatusKind::Info);
+            }
             return;
         }
-        let name = entry.name.clone();
+        self.pending_open = None;
         self.set_status(format!("switching to {name}…"), StatusKind::Info);
         self.pending_context = Some(name);
+    }
+
+    /// Browse `fleet`: list the current kind on every member. The connected
+    /// context stays as it is until a row from another member is opened.
+    pub fn enter_fleet(&mut self, fleet: Fleet) {
+        // A fleet is for finding things wherever they are; the namespace
+        // can still be narrowed with Ctrl-n afterwards.
+        if self.scope != Scope::AllNamespaces {
+            self.scope = Scope::AllNamespaces;
+            self.pollers_stale = true;
+        }
+        self.set_status(
+            format!(
+                "fleet {}: {} ({} contexts)",
+                fleet.name,
+                fleet.members.join(", "),
+                fleet.members.len()
+            ),
+            StatusKind::Info,
+        );
+        self.fleet = Some(fleet);
+        self.fleet_failed.clear();
+        self.reset_rows();
+        self.right = RightMode::Browse;
+        self.pane = Pane::Resources;
+        self.request_rows();
+    }
+
+    fn apply_fleet_input(&mut self, raw: &str) {
+        let names: Vec<String> = self.contexts.iter().map(|c| c.name.clone()).collect();
+        match Fleet::resolve(raw, &self.config.fleets, &names) {
+            Some(fleet) => self.enter_fleet(fleet),
+            None => self.set_status(
+                format!("no context matches {:?}", raw.trim()),
+                StatusKind::Warn,
+            ),
+        }
+    }
+
+    fn reset_rows(&mut self) {
+        self.rows.clear();
+        self.row_view.clear();
+        self.row_selected = 0;
+        self.rows_error = None;
     }
 
     /// Wipe everything cluster-specific. The main loop calls this after it has
@@ -545,10 +717,13 @@ impl App {
         self.events.clear();
         self.event_view.clear();
         self.events_error = None;
-        self.rows.clear();
-        self.row_view.clear();
-        self.row_selected = 0;
-        self.rows_error = None;
+        // Describe is keyed by kind/namespace/name, which the new cluster
+        // may well have too: never show the old cluster's copy.
+        self.describe_open = false;
+        self.describe_for = None;
+        self.describe_text.clear();
+        self.describe_lines.clear();
+        self.describe_error = None;
         self.buffer.clear();
         self.scroll = 0;
         self.right = RightMode::Browse;
@@ -556,6 +731,32 @@ impl App {
             format!("connected to {}", self.context_name),
             StatusKind::Info,
         );
+        // Within a fleet the list is still valid — it spans every member —
+        // so keep it, and open whatever the switch was for.
+        if self.fleet.is_none() {
+            self.reset_rows();
+            self.pending_open = None;
+            return;
+        }
+        let Some(open) = self.pending_open.take() else {
+            return;
+        };
+        let Some(position) = self
+            .row_view
+            .iter()
+            .position(|&i| self.rows[i].identity() == open.identity)
+        else {
+            return;
+        };
+        self.row_selected = position;
+        self.rebuild_event_view();
+        if let Some(view) = open.view {
+            self.set_view(view);
+        }
+        if open.describe {
+            self.describe_open = true;
+            self.sync_describe();
+        }
     }
 
     // ------------------------------------------------------------- inventory
@@ -774,6 +975,10 @@ impl App {
             self.set_status("nothing selected", StatusKind::Warn);
             return;
         }
+        let view = (self.right == RightMode::Detail).then_some(self.view);
+        if self.open_remote(view, true) {
+            return;
+        }
         self.describe_open = true;
         self.sync_describe();
         self.dirty = true;
@@ -791,6 +996,19 @@ impl App {
             return;
         };
         let key = format!("{}/{}/{}", kind.qualified(), row.namespace, row.name);
+        if let Some(context) = self.remote_context() {
+            // Moving the cursor with describe open onto another member's row.
+            self.describe_error = Some(format!(
+                "{} is on {context} — press Enter or d to switch there",
+                row.key()
+            ));
+            self.describe_for = None;
+            self.describe_text.clear();
+            self.describe_lines.clear();
+            self.describe_loading = false;
+            self.dirty = true;
+            return;
+        }
         if self.describe_for.as_deref() == Some(key.as_str()) {
             return;
         }
@@ -809,6 +1027,9 @@ impl App {
             return None;
         }
         self.describe_loading = false;
+        if self.remote_context().is_some() {
+            return None;
+        }
         let kind = self.current_type()?.clone();
         let row = self.selected_row()?;
         Some((kind, row.namespace.clone(), row.name.clone()))
@@ -913,6 +1134,9 @@ impl App {
 
     /// The object the logs tab is about, as a selection target.
     pub fn log_target(&self) -> Option<LogTarget> {
+        if self.remote_context().is_some() {
+            return None;
+        }
         let kind = self.current_type()?.api.kind.clone();
         let row = self.selected_row()?;
         Some(LogTarget {
@@ -1287,6 +1511,7 @@ impl App {
                 | InputMode::Namespace
                 | InputMode::RowFilter
                 | InputMode::Selector
+                | InputMode::Fleet
         ) {
             self.on_prompt_key(key);
             return;
@@ -1354,9 +1579,10 @@ impl App {
             }
 
             KeyCode::Enter => self.activate_selection(),
-            KeyCode::Char('/') => self.enter_prompt(match self.right {
-                RightMode::Browse => InputMode::RowFilter,
-                RightMode::Detail => InputMode::Search,
+            KeyCode::Char('/') => self.enter_prompt(match (self.pane, self.right) {
+                (Pane::Contexts, _) => InputMode::Fleet,
+                (_, RightMode::Browse) => InputMode::RowFilter,
+                (_, RightMode::Detail) => InputMode::Search,
             }),
 
             // log controls
@@ -1534,6 +1760,7 @@ impl App {
                     InputMode::Filter => self.apply_filter_input(&value),
                     InputMode::Namespace => self.set_namespace(&value),
                     InputMode::Selector => self.apply_selector(&value),
+                    InputMode::Fleet => self.apply_fleet_input(&value),
                     InputMode::RowFilter => {
                         self.row_filter = if value.trim().is_empty() {
                             None
@@ -1660,6 +1887,9 @@ impl App {
     }
 
     fn set_view(&mut self, view: View) {
+        if self.open_remote(Some(view), self.describe_open) {
+            return;
+        }
         self.view = view;
         // Picking a tab is also how you open the detail pane.
         if self.right == RightMode::Browse && self.selected_row().is_some() {
@@ -1736,7 +1966,7 @@ impl App {
         }
         match (self.pane, self.right) {
             (Pane::Contexts, _) => {
-                let len = self.contexts.len();
+                let len = self.pane_len();
                 if len == 0 {
                     return;
                 }
@@ -1820,7 +2050,7 @@ impl App {
     fn goto_end(&mut self) {
         match (self.pane, self.right) {
             (Pane::Contexts, _) => {
-                self.context_selected = self.contexts.len().saturating_sub(1);
+                self.context_selected = self.pane_len().saturating_sub(1);
             }
             (Pane::Resources, RightMode::Browse) => {
                 self.row_selected = self.row_view.len().saturating_sub(1);
@@ -1842,6 +2072,9 @@ impl App {
             Pane::Contexts => self.switch_context(),
             Pane::Resources => {
                 if self.right == RightMode::Browse && self.selected_row().is_some() {
+                    if self.open_remote(Some(View::Logs), false) {
+                        return;
+                    }
                     // Enter is the same as `l`: the common case is logs.
                     self.view = View::Logs;
                     self.right = RightMode::Detail;

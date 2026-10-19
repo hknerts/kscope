@@ -79,3 +79,8 @@ jobs:
         run: |
           cargo run --locked -- --dump noisy | tee /tmp/out.log
           grep -q "ERROR failure 200" /tmp/out.log
+      - name: Fleet search must find the pod and name its context
+        run: |
+          cargo run --locked -- --fleet 'kind-*' --find noisy | tee /tmp/find.txt
+          grep -Eq '^kind-[^ ]+ +default +noisy ' /tmp/find.txt
+          ! cargo run --locked -- --fleet 'kind-*' --find no-such-pod

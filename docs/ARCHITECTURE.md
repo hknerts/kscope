@@ -130,6 +130,22 @@ exception: the log view reports the viewport height back to `App`, because
 Key handling puts control chords in their own branch before plain keys — a
 guard-based match silently makes `Char('n')` shadow `Ctrl-n`.
 
+## Fleets
+
+A fleet (`src/k8s/fleet.rs`) is a set of context names resolved from globs.
+Only the browsed list is fleet-wide. Every member gets its own `kube::Client`,
+built once and cached in `fleet::Clients`, and each listing fans out to all
+members concurrently under a per-member timeout. Rows carry the context they
+came from (`ResourceRow::context`), so selection, filtering and stale-answer
+detection work on `identity()` = `context:namespace/name`.
+
+Everything else (inventory, metrics, events, log streams, describe) stays
+bound to the one connected context. Opening a row from another member does not
+fetch across clusters. It records a pending open, asks the main loop for an
+ordinary context switch, and `adopt_context` finishes the open once the new
+client is in place, keeping the fleet's list intact. A row that is not on the
+connected context never has logs or describe fetched for it.
+
 ## Failure behaviour
 
 kscope degrades instead of dying:
