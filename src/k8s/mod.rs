@@ -6,6 +6,7 @@
 
 pub mod discovery;
 pub mod events;
+pub mod fleet;
 pub mod logs;
 pub mod metrics;
 pub mod node_logs;

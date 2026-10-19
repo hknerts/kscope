@@ -20,6 +20,23 @@ pub struct Cli {
     #[arg(long, env = "KSCOPE_CONTEXT")]
     pub context: Option<String>,
 
+    /// Browse several contexts as one: a fleet name from the config file, or
+    /// comma-separated context globs (`stg-*,qa-eu`). Rows from every member
+    /// are listed together, tagged with their context.
+    #[arg(long, value_name = "NAME|GLOBS", env = "KSCOPE_FLEET")]
+    pub fleet: Option<String>,
+
+    /// Resource type to start on (`deploy`, `svc`, a CRD plural…). Also the
+    /// kind `--find` searches. Defaults to pods.
+    #[arg(short = 'k', long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Print every object of `--kind` whose namespace or name contains TEXT,
+    /// across the fleet (or the current context), and exit. Searches all
+    /// namespaces unless `-n` is given. Exits 1 when nothing matches.
+    #[arg(long, value_name = "TEXT", conflicts_with = "dump")]
+    pub find: Option<String>,
+
     /// Label selector, e.g. `app=api,tier!=batch`. Narrows both the browsed
     /// list and the pods a workload's logs are collected from.
     #[arg(short = 'l', long, value_name = "SELECTOR")]
@@ -90,5 +107,15 @@ mod tests {
         );
         let cli = Cli::parse_from(["kscope", "--dump", "api-0"]);
         assert_eq!(cli.dump_target(), Some(("api-0".into(), None)));
+    }
+
+    #[test]
+    fn parses_fleet_search() {
+        let cli = Cli::parse_from([
+            "kscope", "--fleet", "stg-*", "-k", "deploy", "--find", "api",
+        ]);
+        assert_eq!(cli.fleet.as_deref(), Some("stg-*"));
+        assert_eq!(cli.kind.as_deref(), Some("deploy"));
+        assert_eq!(cli.find.as_deref(), Some("api"));
     }
 }

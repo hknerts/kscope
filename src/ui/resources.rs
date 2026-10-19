@@ -15,13 +15,13 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let dim = Style::default().fg(Theme::color(&theme.trace));
     let focused = app.pane == Pane::Resources && app.right == RightMode::Browse;
 
+    let place = match &app.fleet {
+        Some(fleet) => format!("{} · fleet {}", app.scope.label(), fleet.name),
+        None => app.scope.label().to_string(),
+    };
     let title = match &app.row_filter {
-        Some(filter) => format!(
-            " {} /{filter}/ · {} ",
-            app.resource_label(),
-            app.scope.label()
-        ),
-        None => format!(" {} · {} ", app.resource_label(), app.scope.label()),
+        Some(filter) => format!(" {} /{filter}/ · {place} ", app.resource_label()),
+        None => format!(" {} · {place} ", app.resource_label()),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -68,6 +68,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Cluster-scoped kinds have no namespace worth a column.
     let namespaced = app.current_type().map(|t| t.namespaced).unwrap_or(true);
+    let fleet = app.fleet.is_some();
 
     // Borders and the header row take three lines.
     let window = super::table_window(
@@ -86,7 +87,17 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(Theme::color(&theme.info))
             };
-            let mut cells = Vec::with_capacity(4);
+            let mut cells = Vec::with_capacity(5);
+            if fleet {
+                // The connected member stands out: its rows open without a
+                // context switch.
+                let style = if r.context == app.context_name {
+                    Style::default().fg(theme.accent())
+                } else {
+                    dim
+                };
+                cells.push(Cell::from(r.context.clone()).style(style));
+            }
             if namespaced {
                 cells.push(Cell::from(r.namespace.clone()).style(dim));
             }
@@ -99,7 +110,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let (header, widths): (Vec<&str>, Vec<Constraint>) = if namespaced {
+    let (mut header, mut widths): (Vec<&str>, Vec<Constraint>) = if namespaced {
         (
             vec!["namespace", "name", "status", "age"],
             vec![
@@ -119,6 +130,12 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             ],
         )
     };
+
+    if fleet {
+        let width = app.rows.iter().map(|r| r.context.len()).max().unwrap_or(7);
+        header.insert(0, "context");
+        widths.insert(0, Constraint::Length(width.clamp(7, 24) as u16));
+    }
 
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(dim.add_modifier(Modifier::BOLD)))

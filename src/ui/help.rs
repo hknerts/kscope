@@ -33,7 +33,14 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             ("Esc", "leave the detail view, then quit"),
             ("?", "toggle this help"),
             ("Tab", "move focus between contexts and resources"),
-            ("Enter", "on a context: switch cluster"),
+            (
+                "Enter",
+                "on a context: switch cluster; on a fleet: list all its members",
+            ),
+            (
+                "/ (contexts)",
+                "browse an ad-hoc fleet: context globs, e.g. stg-*",
+            ),
         ],
     ),
     (

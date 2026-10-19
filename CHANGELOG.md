@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-19
+
+### Added
+
+- **Fleets: browse many clusters as one.** Name sets of contexts by glob in
+  `[fleets]` (`staging = ["stg-*"]`), or pass globs directly with
+  `--fleet 'stg-*'` or `/` on the contexts pane. Every listing then spans all
+  members, with a `context` column. `/`, `!`, `L` and `:` work across them,
+  and opening a row from another member switches to that cluster first.
+  Members are queried concurrently, each with a 10 s budget, and an
+  unreachable member is reported without blocking the others.
+- `--find TEXT` prints every object of `--kind` whose name or namespace
+  contains TEXT, across the fleet or the current context, and exits 1 when
+  nothing matches.
+- `-k`/`--kind` picks the resource type to start on.
+
+### Fixed
+
+- A context switch could leave the previous cluster's describe overlay on
+  screen for an object with the same name.
+- The browse header listed `Enter` twice.
+
 ## [1.1.1] - 2026-10-18
 
 ### Security

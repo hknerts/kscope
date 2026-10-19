@@ -225,6 +225,25 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(" kscope ", accent),
             Span::styled(format!(":{} ", app.resource_label()), fg),
+            // In a fleet the connected context is only where logs, metrics
+            // and describe come from; say which fleet the list spans, and
+            // how many of its members answered.
+            match &app.fleet {
+                Some(fleet) => Span::styled(
+                    format!(
+                        "fleet:{} {}/{} ",
+                        truncate(&fleet.name, 20),
+                        fleet.members.len() - app.fleet_failed.len(),
+                        fleet.members.len()
+                    ),
+                    if app.fleet_failed.is_empty() {
+                        accent
+                    } else {
+                        Style::default().fg(theme.warn())
+                    },
+                ),
+                None => Span::raw(""),
+            },
             if app.problems_only {
                 Span::styled("problems ", Style::default().fg(theme.error()))
             } else {
@@ -297,11 +316,11 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
     match (app.pane, app.right) {
         (Pane::Contexts, _) => {
             bindings.push(("j/k", "move"));
-            bindings.push(("Enter", "switch context"));
+            bindings.push(("Enter", "switch context / fleet"));
+            bindings.push(("/", "fleet by glob"));
         }
         (Pane::Resources, RightMode::Browse) => {
             bindings.push(("j/k", "move"));
-            bindings.push(("Enter", "open"));
             bindings.push(("Enter", "open logs"));
             bindings.push(("d", "describe"));
             bindings.push(("/", "filter list"));

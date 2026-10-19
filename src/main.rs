@@ -21,6 +21,7 @@ use crate::cli::Cli;
 use app::{App, ContextEntry};
 use config::Config;
 use k8s::discovery::Scope;
+use k8s::fleet::{Fleet, Listing};
 use k8s::resources::{ResourceRow, ResourceType};
 
 #[tokio::main]
@@ -45,20 +46,67 @@ async fn main() -> Result<()> {
         config.logs.timestamps = true;
     }
 
-    let (client, default_ns, context_name, user_name) = k8s::connect(cli.context.as_deref())
+    // A fleet decides which context to connect to first: `--context` if it
+    // is given, else the kubeconfig's current context when that is a member,
+    // else the first member.
+    let kube_contexts = k8s::resources::contexts();
+    let names: Vec<String> = kube_contexts.keys().cloned().collect();
+    let fleet = match &cli.fleet {
+        Some(spec) => Some(
+            Fleet::resolve(spec, &config.fleets, &names)
+                .with_context(|| format!("no kubeconfig context matches fleet {spec:?}"))?,
+        ),
+        None => None,
+    };
+    let fleet_clients = k8s::fleet::Clients::default();
+    let initial_context = match (&cli.context, &fleet) {
+        (Some(context), _) => Some(context.clone()),
+        (None, Some(fleet)) => {
+            let current = kube::config::Kubeconfig::read()
+                .ok()
+                .and_then(|k| k.current_context);
+            Some(
+                k8s::fleet::first_reachable(&fleet_clients, &fleet.members, current.as_deref())
+                    .await
+                    .with_context(|| format!("no member of fleet {} answered", fleet.name))?,
+            )
+        }
+        (None, None) => None,
+    };
+
+    let (client, default_ns, context_name, user_name) = k8s::connect(initial_context.as_deref())
         .await
         .context("could not reach the cluster")?;
 
-    let scope = if cli.all_namespaces {
+    // Searching a fleet is about finding things wherever they are, so it
+    // spans every namespace unless one is asked for.
+    let explicit_ns = cli
+        .namespace
+        .clone()
+        .or_else(|| config.general.namespace.clone());
+    let scope = if cli.all_namespaces
+        || (explicit_ns.is_none() && (fleet.is_some() || cli.find.is_some()))
+    {
         Scope::AllNamespaces
     } else {
-        Scope::Namespace(
-            cli.namespace
-                .clone()
-                .or_else(|| config.general.namespace.clone())
-                .unwrap_or(default_ns),
-        )
+        Scope::Namespace(explicit_ns.unwrap_or(default_ns))
     };
+
+    // Non-interactive mode: search and exit.
+    if let Some(needle) = &cli.find {
+        fleet_clients.insert(&context_name, client.clone()).await;
+        let found = find(
+            &fleet_clients,
+            &context_name,
+            fleet.as_ref(),
+            cli.kind.as_deref().unwrap_or("pods"),
+            &scope,
+            cli.selector.as_deref().unwrap_or(""),
+            needle,
+        )
+        .await?;
+        std::process::exit(if found { 0 } else { 1 });
+    }
 
     // Non-interactive mode: dump and exit.
     if let Some((pod, container)) = cli.dump_target() {
@@ -90,7 +138,13 @@ async fn main() -> Result<()> {
         scope,
         context_name,
         user_name,
-        cli.selector.clone().unwrap_or_default(),
+        Start {
+            clients: fleet_clients,
+            selector: cli.selector.clone().unwrap_or_default(),
+            kind: cli.kind.clone(),
+            fleet,
+            contexts: kube_contexts,
+        },
     )
     .await;
     restore_terminal(&mut terminal)?;
@@ -98,6 +152,89 @@ async fn main() -> Result<()> {
 }
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+/// What the command line asked the TUI to start on.
+struct Start {
+    /// Clients already built while picking the first fleet member.
+    clients: k8s::fleet::Clients,
+    selector: String,
+    kind: Option<String>,
+    fleet: Option<Fleet>,
+    contexts: std::collections::BTreeMap<String, String>,
+}
+
+/// `--find`: list `kind` on every member (or just the connected context),
+/// print the rows whose namespace or name contains `needle`, and report
+/// whether there were any. Unreachable members go to stderr, not stdout, so
+/// the table stays pipeable.
+async fn find(
+    clients: &k8s::fleet::Clients,
+    context_name: &str,
+    fleet: Option<&Fleet>,
+    kind: &str,
+    scope: &Scope,
+    selector: &str,
+    needle: &str,
+) -> Result<bool> {
+    let client = clients.get(context_name).await?;
+    let types = k8s::resources::discover(&client)
+        .await
+        .context("discovering resource types")?;
+    let kind = k8s::resources::resolve(&types, kind)
+        .with_context(|| format!("no such resource type: {kind}"))?
+        .clone();
+    let members = match fleet {
+        Some(fleet) => fleet.members.clone(),
+        None => vec![context_name.to_string()],
+    };
+    let listing = k8s::fleet::list(clients, &members, &kind, scope, selector).await;
+    for (context, err) in &listing.failed {
+        eprintln!("kscope: {context}: {err}");
+    }
+    if listing.failed.len() == members.len() {
+        anyhow::bail!("no context answered");
+    }
+
+    let needle = needle.to_ascii_lowercase();
+    let hits: Vec<&ResourceRow> = listing
+        .rows
+        .iter()
+        .filter(|r| {
+            r.name.to_ascii_lowercase().contains(&needle)
+                || r.namespace.to_ascii_lowercase().contains(&needle)
+        })
+        .collect();
+    let width = |f: fn(&ResourceRow) -> &str, title: &str| {
+        hits.iter()
+            .map(|r| f(r).chars().count())
+            .chain([title.len()])
+            .max()
+            .unwrap_or(0)
+    };
+    let (wc, wn, wm, ws) = (
+        width(|r| &r.context, "CONTEXT"),
+        width(|r| &r.namespace, "NAMESPACE"),
+        width(|r| &r.name, "NAME"),
+        width(|r| &r.status, "STATUS"),
+    );
+    if !hits.is_empty() {
+        println!(
+            "{:wc$}  {:wn$}  {:wm$}  {:ws$}  AGE",
+            "CONTEXT", "NAMESPACE", "NAME", "STATUS"
+        );
+    }
+    for r in &hits {
+        println!(
+            "{:wc$}  {:wn$}  {:wm$}  {:ws$}  {}",
+            r.context,
+            r.namespace,
+            r.name,
+            r.status,
+            k8s::fmt_age(r.age_seconds)
+        );
+    }
+    Ok(!hits.is_empty())
+}
 
 fn setup_terminal(mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
@@ -204,7 +341,7 @@ async fn run(
     scope: Scope,
     context_name: String,
     user_name: String,
-    selector: String,
+    start: Start,
 ) -> Result<()> {
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(1024);
     let (inv_tx, mut inv_rx) = tokio::sync::mpsc::channel(16);
@@ -214,7 +351,7 @@ async fn run(
     // get their own channel and a task spawned per refresh. Each result is
     // tagged with what was asked for, so an answer that arrives after the user
     // has moved on to another kind is recognised and dropped.
-    type Rows = (String, Result<Vec<ResourceRow>, String>);
+    type Rows = (String, Result<Listing, String>);
     let (row_tx, mut row_rx) = tokio::sync::mpsc::channel::<Rows>(8);
     // Header details and context switches are network round trips (a context
     // switch may even run an exec credential plugin), so neither is awaited
@@ -245,7 +382,11 @@ async fn run(
     );
 
     spawn_version(&client, &context_name, ver_tx.clone());
-    let contexts = k8s::resources::contexts()
+    // Fleet members get their own clients, built once and kept.
+    let fleet_clients = start.clients;
+    fleet_clients.insert(&context_name, client.clone()).await;
+    let contexts = start
+        .contexts
         .into_iter()
         .map(|(name, cluster)| ContextEntry { name, cluster })
         .collect();
@@ -261,8 +402,15 @@ async fn run(
         contexts,
     );
 
-    if !selector.is_empty() {
-        app.set_selector(&selector);
+    if !start.selector.is_empty() {
+        app.set_selector(&start.selector);
+    }
+    app.start_kind = start.kind;
+    if let Some(fleet) = start.fleet {
+        app.enter_fleet(fleet);
+        // Entering a fleet asks for the pollers to be re-scoped, but these
+        // were spawned against the right scope a moment ago.
+        app.pollers_stale = false;
     }
     spawn_discovery(&app.client, type_tx.clone());
 
@@ -299,7 +447,7 @@ async fn run(
                 listing = None;
                 last_listed = Instant::now();
                 if Some(key) == list_key(&app) {
-                    app.on_rows(rows);
+                    app.on_listing(rows);
                 } else {
                     // Stale: the kind, scope or selector changed meanwhile.
                     app.request_rows();
@@ -315,7 +463,14 @@ async fn run(
             Some(switched) = ctx_rx.recv() => match switched {
                 Ok((new_client, default_ns, new_context, new_user)) => {
                     pollers.abort();
-                    let new_scope = Scope::Namespace(default_ns);
+                    fleet_clients.insert(&new_context, new_client.clone()).await;
+                    // Moving within a fleet keeps the fleet's scope; leaving
+                    // for a single context lands on its own namespace.
+                    let new_scope = if app.fleet.is_some() {
+                        app.scope.clone()
+                    } else {
+                        Scope::Namespace(default_ns)
+                    };
                     pollers = Pollers::spawn(
                         &new_client,
                         &new_scope,
@@ -432,10 +587,22 @@ async fn run(
                 let scope = app.scope.clone();
                 let selector = app.selector_text.clone();
                 let tx = row_tx.clone();
+                let members = app.fleet.as_ref().map(|f| f.members.clone());
+                let clients = fleet_clients.clone();
                 tokio::spawn(async move {
-                    let result = k8s::resources::list(&client, &kind, &scope, &selector)
-                        .await
-                        .map_err(|e| format!("listing {}: {e}", kind.name()));
+                    let result = match members {
+                        Some(members) => Ok(k8s::fleet::list(
+                            &clients, &members, &kind, &scope, &selector,
+                        )
+                        .await),
+                        None => k8s::resources::list(&client, &kind, &scope, &selector)
+                            .await
+                            .map(|rows| Listing {
+                                rows,
+                                failed: Vec::new(),
+                            })
+                            .map_err(|e| format!("listing {}: {e}", kind.name())),
+                    };
                     let _ = tx.send((key, result)).await;
                 });
             } else {
@@ -461,9 +628,15 @@ async fn run(
 /// the same rows.
 fn list_key(app: &App) -> Option<String> {
     let kind = app.current_type()?;
+    // A fleet's listing does not depend on which member is connected, so
+    // moving between members does not throw an in-flight answer away.
+    let source = match &app.fleet {
+        Some(fleet) => format!("fleet:{}", fleet.name),
+        None => app.context_name.clone(),
+    };
     Some(format!(
         "{}|{}|{}|{}",
-        app.context_name,
+        source,
         kind.qualified(),
         app.scope.label(),
         app.selector_text

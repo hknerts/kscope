@@ -131,6 +131,9 @@ pub fn resolve<'a>(types: &'a [ResourceType], selector: &str) -> Option<&'a Reso
 /// One listed object, flattened to what a table needs.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceRow {
+    /// The context the row was listed from, when browsing a fleet. Empty for
+    /// an ordinary single-cluster listing.
+    pub context: String,
     pub namespace: String,
     pub name: String,
     pub age_seconds: i64,
@@ -150,6 +153,16 @@ impl ResourceRow {
             self.name.clone()
         } else {
             format!("{}/{}", self.namespace, self.name)
+        }
+    }
+
+    /// Unique across a fleet: the same `namespace/name` can exist in every
+    /// member, and keeping the selection must not jump between them.
+    pub fn identity(&self) -> String {
+        if self.context.is_empty() {
+            self.key()
+        } else {
+            format!("{}:{}", self.context, self.key())
         }
     }
 }
@@ -223,6 +236,7 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
         .unwrap_or(0);
     let (status, unhealthy) = summarise(&obj.data);
     ResourceRow {
+        context: String::new(),
         namespace: obj.metadata.namespace.clone().unwrap_or_default(),
         name: obj.metadata.name.clone().unwrap_or_default(),
         age_seconds,
