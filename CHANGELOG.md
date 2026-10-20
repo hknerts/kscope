@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A calmer, aligned header.** The left side says where you are in labelled
+  rows (`context`, `showing pods in shop · only problems`, `cpu`/`mem`,
+  `health` with items, problems and warnings). The middle lists only the keys
+  that work on the current screen, aligned per column. The mixed strip of
+  tabs and modes is gone.
+- **`e` opens events**, like `l` logs and `m` metrics. `E` still works.
+  The separate "errors only" key is gone: `L` steps the minimum level to
+  ERROR, which is the same filter, and now says what it shows.
+- The detail tabs read `l logs  m metrics  e events  d describe`, and the
+  view is called "metrics" everywhere, not "monitoring" in some places.
+- `!` is "only problems" everywhere (header, help, status), and the status
+  says how to show everything again.
+- The status bar keeps messages on the left and right-aligns only the facts
+  that say something: no `drop:0`, and no filter when nothing is filtered.
+
+### Fixed
+
+- DEBUG and TRACE lines were hidden from the start: the log filter's default
+  threshold came from `Level`'s default, which is INFO. Every level is shown
+  until `L` narrows it.
+
 ## [1.4.0] - 2026-10-21
 
 ### Fixed

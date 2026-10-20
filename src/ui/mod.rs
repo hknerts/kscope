@@ -21,6 +21,7 @@ use ratatui::Frame;
 
 use crate::app::{App, InputMode, Pane, RightMode, StatusKind, View};
 use crate::config::Theme;
+use crate::k8s::discovery::Scope;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -72,36 +73,49 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let dim = Style::default().fg(Theme::color(&theme.trace));
-    let tab = |label: &'static str, active: bool| {
-        if active {
-            Span::styled(
-                format!(" {label} "),
-                Style::default()
-                    .fg(Theme::color(&theme.match_fg))
-                    .bg(theme.accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(format!(" {label} "), dim)
-        }
-    };
-
+    let key_style = Style::default().fg(theme.accent());
+    let name_style = Style::default().fg(Theme::color(&theme.fg));
+    let on = Style::default()
+        .fg(Theme::color(&theme.match_fg))
+        .bg(theme.accent())
+        .add_modifier(Modifier::BOLD);
     let subject = app
         .selected_row()
         .map(|r| r.key())
         .unwrap_or_else(|| "—".into());
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", truncate(&subject, 40)),
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD),
+
+    // One tab per view, each with its key, the open one highlighted; the
+    // same four names the header and help use.
+    let mut spans = vec![Span::styled(
+        format!(" {}   ", truncate(&subject, 40)),
+        Style::default()
+            .fg(theme.accent())
+            .add_modifier(Modifier::BOLD),
+    )];
+    let tabs = [
+        ("l", "logs", app.view == View::Logs && !app.describe_open),
+        (
+            "m",
+            "metrics",
+            app.view == View::Metrics && !app.describe_open,
         ),
-        tab("l:logs", app.view == View::Logs),
-        tab("m:monitoring", app.view == View::Metrics),
-        tab("E:events", app.view == View::Events),
+        (
+            "e",
+            "events",
+            app.view == View::Events && !app.describe_open,
+        ),
+        ("d", "describe", app.describe_open),
     ];
-    spans.push(Span::styled("   d: describe   Esc: back", dim));
+    for (key, name, active) in tabs {
+        if active {
+            spans.push(Span::styled(format!(" {key} {name} "), on));
+        } else {
+            spans.push(Span::styled(format!(" {key} "), key_style));
+            spans.push(Span::styled(format!("{name} "), name_style));
+        }
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled("    Esc back", dim));
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
     match app.view {
@@ -183,10 +197,10 @@ const ICON_WIDTH: u16 = 17;
 const GLASS: Color = Color::Rgb(0x10, 0x4e, 0x63);
 const GLINT: Color = Color::Rgb(0xe8, 0xfc, 0xff);
 
-/// Header: five rows, same height as ever. Identity and live cluster gauges
-/// on the left; in the middle a strip of what kscope can do, lit up for what
-/// is on screen right now, over the keys that apply here; the binoculars on
-/// the right.
+/// Header: five rows. On the left, where you are — cluster, what is listed,
+/// how loaded it is, what is wrong — as labelled, aligned rows. In the
+/// middle, only the keys that do something on this screen, in aligned
+/// columns. On the right, the binoculars.
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     let block = Block::default()
@@ -198,8 +212,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(44),
-            Constraint::Length(2),
+            Constraint::Length(IDENTITY_WIDTH),
+            Constraint::Length(3),
             Constraint::Min(20),
             Constraint::Length(2),
             Constraint::Length(ICON_WIDTH),
@@ -207,26 +221,21 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     draw_identity(f, app, cols[0]);
-    let middle = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(cols[2]);
-    draw_capabilities(f, app, middle[0]);
-    draw_shortcuts(f, app, middle[1]);
+    draw_shortcuts(f, app, cols[2]);
     draw_icon(f, app, cols[4]);
 }
 
-/// `███░░░░░`, coloured by the same thresholds as the metrics view.
-fn gauge(app: &App, label: &'static str, percent: Option<f64>) -> Vec<Span<'static>> {
+const IDENTITY_WIDTH: u16 = 46;
+/// Width of the label column on the left, so every value starts aligned.
+const LABEL_WIDTH: usize = 10;
+
+/// `███░░░░░ 41%`, coloured by the same thresholds as the metrics view.
+fn gauge(app: &App, percent: Option<f64>) -> Vec<Span<'static>> {
     let theme = &app.config.theme;
     let dim = Style::default().fg(Theme::color(&theme.trace));
     const CELLS: usize = 8;
     let Some(percent) = percent else {
-        return vec![
-            Span::styled(format!("{label} "), dim),
-            Span::styled("░".repeat(CELLS), dim),
-            Span::styled("   – ", dim),
-        ];
+        return vec![Span::styled(format!("{}   –", "░".repeat(CELLS)), dim)];
     };
     let filled = ((percent / 100.0) * CELLS as f64)
         .round()
@@ -239,11 +248,10 @@ fn gauge(app: &App, label: &'static str, percent: Option<f64>) -> Vec<Span<'stat
         Theme::color(&theme.info)
     };
     vec![
-        Span::styled(format!("{label} "), dim),
         Span::styled("█".repeat(filled), Style::default().fg(color)),
         Span::styled("░".repeat(CELLS - filled), dim),
         Span::styled(
-            format!("{:>4} ", format!("{percent:.0}%")),
+            format!("{:>4}", format!("{percent:.0}%")),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ]
@@ -256,46 +264,41 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Theme::color(&theme.trace));
     let fg = Style::default().fg(Theme::color(&theme.fg));
-    let badge = Style::default()
-        .bg(theme.accent())
-        .fg(Theme::color(&theme.match_fg))
+    let strong = fg.add_modifier(Modifier::BOLD);
+    let bad = Style::default()
+        .fg(theme.error())
         .add_modifier(Modifier::BOLD);
+    let warn = Style::default()
+        .fg(theme.warn())
+        .add_modifier(Modifier::BOLD);
+    let label = |text: &str| Span::styled(format!(" {text:<w$}", w = LABEL_WIDTH - 1), dim);
 
-    // Title: the wordmark as a badge, then what is being browsed and how it
-    // is narrowed.
+    // Brand, the promise, and the fleet when one is being browsed.
     let mut title = vec![
         Span::raw(" "),
-        Span::styled(" kscope ", badge),
-        Span::styled(format!(" :{} ", app.resource_label()), accent),
+        Span::styled(
+            " kscope ",
+            Style::default()
+                .bg(theme.accent())
+                .fg(Theme::color(&theme.match_fg))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  read-only",
+            Style::default().fg(Theme::color(&theme.info)),
+        ),
     ];
     if let Some(fleet) = &app.fleet {
         let answered = fleet.members.len() - app.fleet_failed.len();
-        let style = if app.fleet_failed.is_empty() {
-            accent
-        } else {
-            Style::default()
-                .fg(theme.warn())
-                .add_modifier(Modifier::BOLD)
-        };
+        title.push(Span::styled("   fleet ", dim));
+        title.push(Span::styled(truncate(&fleet.name, 12), accent));
         title.push(Span::styled(
-            format!(
-                "◆ {} {answered}/{} ",
-                truncate(&fleet.name, 14),
-                fleet.members.len()
-            ),
-            style,
-        ));
-    }
-    if app.problems_only {
-        title.push(Span::styled(
-            "! problems ",
-            Style::default().fg(theme.error()),
-        ));
-    }
-    if !app.selector_text.is_empty() {
-        title.push(Span::styled(
-            format!("-l {} ", truncate(&app.selector_text, 14)),
-            dim,
+            format!(" {answered}/{} clusters", fleet.members.len()),
+            if app.fleet_failed.is_empty() {
+                dim
+            } else {
+                warn
+            },
         ));
     }
 
@@ -307,142 +310,71 @@ fn draw_identity(f: &mut Frame, app: &App, area: Rect) {
         _ => Style::default().fg(Theme::color(&theme.info)),
     };
     let context = Line::from(vec![
-        Span::styled(" ● ", health),
-        Span::styled(
-            truncate(&app.context_name, 26),
-            fg.add_modifier(Modifier::BOLD),
-        ),
+        label("context"),
+        Span::styled("● ", health),
+        Span::styled(truncate(&app.context_name, 24), strong),
         Span::styled(format!("  {}", app.k8s_version), dim),
     ]);
-    let who = Line::from(vec![
-        Span::styled("   user ", dim),
+
+    // What the list holds, in words: "pods in shop · only problems".
+    let mut showing = vec![
+        label("showing"),
+        Span::styled(app.resource_label(), strong),
+        Span::styled(" in ", dim),
         Span::styled(
-            truncate(
-                if app.user_name.is_empty() {
-                    "-"
-                } else {
-                    &app.user_name
-                },
-                16,
-            ),
-            fg,
+            match &app.scope {
+                Scope::AllNamespaces => "all namespaces".to_string(),
+                Scope::Namespace(ns) => truncate(ns, 16),
+            },
+            strong,
         ),
-        Span::styled("  ns ", dim),
-        Span::styled(truncate(app.scope.label(), 12), fg),
-    ]);
+    ];
+    if app.problems_only {
+        showing.push(Span::styled(" · only problems", bad));
+    }
+    if !app.selector_text.is_empty() {
+        showing.push(Span::styled(
+            format!(" · {}", truncate(&app.selector_text, 12)),
+            accent,
+        ));
+    }
 
     let (cpu_used, cpu_cap, mem_used, mem_cap) = app.metrics.cluster_totals();
     let have = app.metrics.error.is_none() && cpu_cap > 0.0;
-    let mut gauges = vec![Span::raw("   ")];
-    gauges.extend(gauge(
+    let mut usage = vec![label("cpu")];
+    usage.extend(gauge(
         app,
-        "cpu",
         have.then(|| crate::metrics::pct(cpu_used, cpu_cap)),
     ));
-    gauges.push(Span::raw(" "));
-    gauges.extend(gauge(
+    usage.push(Span::styled("   mem ", dim));
+    usage.extend(gauge(
         app,
-        "mem",
         have.then(|| crate::metrics::pct(mem_used, mem_cap)),
     ));
 
     let warnings = app.events.iter().filter(|e| e.type_ == "Warning").count();
     let troubled = app.rows.iter().filter(|r| r.unhealthy).count();
-    let counts = Line::from(vec![
-        Span::styled("   ", dim),
-        Span::styled(app.rows.len().to_string(), fg.add_modifier(Modifier::BOLD)),
-        Span::styled(" items · ", dim),
-        Span::styled(
-            troubled.to_string(),
-            if troubled > 0 {
-                Style::default()
-                    .fg(theme.error())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                fg
-            },
-        ),
-        Span::styled(" trouble · ", dim),
-        Span::styled(
-            warnings.to_string(),
-            if warnings > 0 {
-                Style::default()
-                    .fg(theme.warn())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                fg
-            },
-        ),
-        Span::styled(" warn · ", dim),
-        Span::styled(app.inventory.nodes.len().to_string(), fg),
-        Span::styled(" nodes", dim),
-    ]);
+    let count = |n: usize, one: &str, many: &str, style: Style| {
+        vec![
+            Span::styled(n.to_string(), if n > 0 { style } else { fg }),
+            Span::styled(format!(" {}", if n == 1 { one } else { many }), dim),
+        ]
+    };
+    let mut status = vec![label("health")];
+    status.extend(count(app.rows.len(), "item", "items", strong));
+    status.push(Span::styled(" · ", dim));
+    status.extend(count(troubled, "problem", "problems", bad));
+    status.push(Span::styled(" · ", dim));
+    status.extend(count(warnings, "warning", "warnings", warn));
 
-    let lines = vec![Line::from(title), context, who, Line::from(gauges), counts];
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// One chip per thing kscope does, lit when it is what you are looking at:
-/// the open tab, the describe overlay, a fleet, the triage filter.
-fn draw_capabilities(f: &mut Frame, app: &App, area: Rect) {
-    let theme = &app.config.theme;
-    let detail = app.right == RightMode::Detail;
-    let chips: [(&str, &str, bool); 6] = [
-        (
-            "l",
-            "logs",
-            detail && app.view == View::Logs && !app.describe_open,
-        ),
-        (
-            "m",
-            "metrics",
-            detail && app.view == View::Metrics && !app.describe_open,
-        ),
-        (
-            "E",
-            "events",
-            detail && app.view == View::Events && !app.describe_open,
-        ),
-        ("d", "describe", app.describe_open),
-        ("◆", "fleet", app.fleet.is_some()),
-        ("!", "triage", app.problems_only),
+    let lines = vec![
+        Line::from(title),
+        context,
+        Line::from(showing),
+        Line::from(usage),
+        Line::from(status),
     ];
-    let on = Style::default()
-        .bg(theme.accent())
-        .fg(Theme::color(&theme.match_fg))
-        .add_modifier(Modifier::BOLD);
-    let off_key = Style::default().fg(theme.accent());
-    let off = Style::default().fg(Theme::color(&theme.fg));
-    let dim = Style::default().fg(Theme::color(&theme.trace));
-
-    // Whole chips only: one that would be cut at the edge is left out. The
-    // read-only promise goes last, and only when there is room for it.
-    let promise = "   ⊘ read-only";
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-    for (key, name, active) in chips {
-        let width = key.chars().count() + name.chars().count() + 3 + usize::from(used > 0);
-        if used + width > area.width as usize {
-            break;
-        }
-        if used > 0 {
-            spans.push(Span::styled("│", dim));
-        }
-        if active {
-            spans.push(Span::styled(format!(" {key} {name} "), on));
-        } else {
-            spans.push(Span::styled(format!(" {key} "), off_key));
-            spans.push(Span::styled(format!("{name} "), off));
-        }
-        used += width;
-    }
-    if used + promise.chars().count() <= area.width as usize {
-        spans.push(Span::styled(
-            promise,
-            Style::default().fg(Theme::color(&theme.info)),
-        ));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_icon(f: &mut Frame, app: &App, area: Rect) {
@@ -478,99 +410,116 @@ fn draw_icon(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// A persistent, context-sensitive keybinding grid in the header — the
-/// "always visible" cheat sheet `?` otherwise hides behind an overlay.
-/// Bindings are laid out in columns of `area.height` rows so they use the
-/// full height of the header instead of running off one long line.
+/// The keys that do something on this screen, in columns of `area.height`
+/// rows. Within a column every key is padded to the widest one, so the
+/// descriptions line up; columns that do not fit whole are left out (`?`
+/// lists everything) rather than squeezed.
 fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
     let theme = &app.config.theme;
     let key = Style::default()
         .fg(theme.accent())
         .add_modifier(Modifier::BOLD);
-    let label = Style::default().fg(Theme::color(&theme.trace));
+    let label = Style::default().fg(Theme::color(&theme.fg));
 
-    let mut bindings: Vec<(&str, &str)> = vec![(":", "resource"), ("Tab", "pane")];
+    let mut bindings: Vec<(&str, &str)> = Vec::new();
     match (app.pane, app.right) {
         (Pane::Contexts, _) => {
+            bindings.push(("Enter", "switch to it"));
+            bindings.push(("/", "fleet, e.g. stg"));
             bindings.push(("j/k", "move"));
-            bindings.push(("Enter", "switch context / fleet"));
-            bindings.push(("/", "fleet by glob"));
+            bindings.push(("Tab", "back to the list"));
         }
         (Pane::Resources, RightMode::Browse) => {
-            bindings.push(("j/k", "move"));
             bindings.push(("Enter", "open logs"));
-            bindings.push(("d", "describe"));
-            bindings.push(("/", "filter list"));
-            bindings.push(("!", "problems only"));
+            bindings.push(("m e d", "metrics, events, yaml"));
+            bindings.push(("/", "filter by name"));
+            bindings.push(("!", "only problems"));
+            bindings.push((":", "resource type"));
             bindings.push(("L", "label selector"));
             bindings.push(("Ctrl-n", "namespace"));
-            bindings.push(("Ctrl-r", "refresh"));
+            bindings.push(("Tab", "clusters"));
         }
         (Pane::Resources, RightMode::Detail) => {
-            bindings.push(("l/m/E", "switch tab"));
-            bindings.push(("d", "describe"));
-            bindings.push(("Esc", "back to list"));
             match app.view {
                 View::Logs => {
-                    bindings.push(("v", "node service"));
                     bindings.push(("/", "search"));
-                    bindings.push(("\\", "filter"));
-                    bindings.push(("L/e", "level/errors"));
-                    bindings.push(("F/w", "follow/wrap"));
-                    bindings.push(("t/p", "time/prev"));
-                    bindings.push(("c/s", "clear/save"));
+                    bindings.push(("n N", "next, previous"));
+                    bindings.push(("\\", "filter lines"));
+                    bindings.push(("L", "minimum level"));
+                    bindings.push(("F", "follow"));
+                    bindings.push(("w", "wrap"));
+                    bindings.push(("t", "timestamps"));
+                    bindings.push(("p", "previous container"));
+                    if app
+                        .log_target()
+                        .is_some_and(|t| t.kind.eq_ignore_ascii_case("node"))
+                    {
+                        bindings.push(("v", "node service"));
+                    }
+                    bindings.push(("s", "save to file"));
                 }
                 View::Metrics => {
                     bindings.push(("S", "sort"));
+                    bindings.push(("j/k", "move"));
                 }
                 View::Events => {
                     bindings.push(("W", "warnings only"));
+                    bindings.push(("j/k", "move"));
                 }
             }
+            bindings.push(("Esc", "back to the list"));
         }
     }
-    bindings.push(("?", "help"));
-    bindings.push(("q", "quit"));
+    let tail = [("?", "all keys"), ("q", "quit")];
 
-    // Each column is "KEY    description" (7 + up to 14 chars) plus a 2-cell
-    // gutter, so adjacent columns never visually run into each other even
-    // when a description fills the whole column width.
-    const COL_WIDTH: u16 = 21;
-    const GUTTER: u16 = 2;
     let rows = (area.height as usize).max(1);
-    // On a narrow terminal, show the columns that fit whole rather than
-    // squeezing every column until keys read "En" and "Ct". `?` and `q` are
-    // kept: help lists everything that had to go.
-    let fit = ((area.width + GUTTER) / (COL_WIDTH + GUTTER)).max(1) as usize;
-    if bindings.len() > fit * rows {
-        let tail = bindings.split_off(bindings.len() - 2);
-        bindings.truncate(fit * rows - tail.len());
-        bindings.extend(tail);
-    }
-    let col_count = bindings.len().div_ceil(rows);
-    let mut constraints = Vec::with_capacity(col_count * 2);
-    for i in 0..col_count {
-        if i > 0 {
-            constraints.push(Constraint::Length(GUTTER));
+    const GUTTER: usize = 3;
+    let width_of = |column: &[(&str, &str)]| {
+        let keys = column
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(0);
+        let descs = column
+            .iter()
+            .map(|(_, d)| d.chars().count())
+            .max()
+            .unwrap_or(0);
+        (keys, keys + 1 + descs)
+    };
+    // Drop bindings from the end (keeping `?` and `q`) until the columns fit.
+    let columns = loop {
+        let all: Vec<(&str, &str)> = bindings.iter().copied().chain(tail).collect();
+        let columns: Vec<Vec<(&str, &str)>> = all.chunks(rows).map(<[_]>::to_vec).collect();
+        let total: usize = columns.iter().map(|c| width_of(c).1).sum::<usize>()
+            + GUTTER * columns.len().saturating_sub(1);
+        if total <= area.width as usize || bindings.is_empty() {
+            break columns;
         }
-        constraints.push(Constraint::Length(COL_WIDTH));
-    }
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area);
+        bindings.pop();
+    };
 
-    for (col_area, chunk) in cols.iter().step_by(2).zip(bindings.chunks(rows)) {
-        let lines: Vec<Line> = chunk
+    let mut x = area.x;
+    for column in columns {
+        let (key_width, width) = width_of(&column);
+        let lines: Vec<Line> = column
             .iter()
             .map(|(k, desc)| {
                 Line::from(vec![
-                    Span::styled(format!("{k:<7}"), key),
+                    Span::styled(format!("{k:<key_width$} "), key),
                     Span::styled(*desc, label),
                 ])
             })
             .collect();
-        f.render_widget(Paragraph::new(lines), *col_area);
+        let width = (width as u16).min(area.right().saturating_sub(x));
+        f.render_widget(
+            Paragraph::new(lines),
+            Rect::new(x, area.y, width, area.height),
+        );
+        x = x.saturating_add(width + GUTTER as u16);
+        if x >= area.right() {
+            break;
+        }
     }
 }
 
@@ -599,78 +548,99 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     };
     let dim = Style::default().fg(Theme::color(&theme.trace));
+    let accent = Style::default().fg(theme.accent());
 
-    let mut spans = vec![Span::styled(format!(" {}", app.status.text), kind_style)];
-    spans.push(Span::styled("  │  ", dim));
-
+    // Right-aligned facts about what is on screen; only the ones that say
+    // something (no "drop:0", no filter when nothing is filtered).
+    let mut facts: Vec<Span> = Vec::new();
+    let mut fact = |text: String, style: Style| {
+        if !facts.is_empty() {
+            facts.push(Span::styled(" · ", dim));
+        }
+        facts.push(Span::styled(text, style));
+    };
     match app.right {
         RightMode::Browse => {
-            spans.push(Span::styled(
-                format!(
-                    "{}/{} {}",
-                    app.row_view.len(),
-                    app.rows.len(),
-                    app.resource_label()
-                ),
+            let (shown, total) = (app.row_view.len(), app.rows.len());
+            fact(
+                if shown == total {
+                    format!("{total} {}", app.resource_label())
+                } else {
+                    format!("{shown} of {total} {}", app.resource_label())
+                },
                 dim,
-            ));
+            );
         }
         RightMode::Detail => match app.view {
             View::Logs => {
-                spans.push(Span::styled(
-                    format!(
-                        "{}/{} lines  drop:{}  {}{}",
-                        app.buffer.view_len(),
-                        app.buffer.len(),
-                        app.buffer.dropped,
-                        if app.buffer.filter.is_active() {
-                            format!("filter:{}  ", app.buffer.filter.describe())
-                        } else {
-                            String::new()
-                        },
-                        if app.follow { "FOLLOW" } else { "paused" }
-                    ),
+                let (shown, kept) = (app.buffer.view_len(), app.buffer.len());
+                fact(
+                    if shown == kept {
+                        format!("{kept} lines")
+                    } else {
+                        format!("{shown} of {kept} lines")
+                    },
                     dim,
-                ));
+                );
+                if app.buffer.dropped > 0 {
+                    fact(format!("{} evicted", app.buffer.dropped), dim);
+                }
+                if app.buffer.filter.is_active() {
+                    fact(format!("filter {}", app.buffer.filter.describe()), accent);
+                }
+                fact(
+                    if app.follow { "following" } else { "paused" }.to_string(),
+                    if app.follow {
+                        dim
+                    } else {
+                        Style::default().fg(theme.warn())
+                    },
+                );
                 if app.search.regex.is_some() {
-                    spans.push(Span::styled(
-                        format!("  /{}/ {} hits", app.search.query, app.search.total),
-                        Style::default().fg(theme.accent()),
-                    ));
+                    fact(
+                        format!("/{}/ {} matches", app.search.query, app.search.total),
+                        accent,
+                    );
                 }
             }
             View::Events => {
                 let warnings = app.visible_events().filter(|e| e.is_warning()).count();
-                spans.push(Span::styled(
-                    format!("{} events", app.event_view.len()),
-                    dim,
-                ));
+                fact(format!("{} events", app.event_view.len()), dim);
                 if warnings > 0 {
-                    spans.push(Span::styled(
-                        format!("  {warnings} warnings"),
-                        Style::default().fg(theme.error()),
-                    ));
+                    fact(
+                        format!("{warnings} warnings"),
+                        Style::default().fg(theme.warn()),
+                    );
                 }
             }
             View::Metrics => {
-                let age = app
-                    .metrics_age()
-                    .map(|d| format!("{}s ago", d.as_secs()))
-                    .unwrap_or_else(|| "waiting".into());
-                spans.push(Span::styled(
-                    format!(
-                        "sort:{}  refresh:{}  samples:{}",
-                        app.sort_by.label(),
-                        age,
-                        app.metrics.history
-                    ),
+                fact(format!("sorted by {}", app.sort_by.label()), dim);
+                fact(
+                    app.metrics_age()
+                        .map(|d| format!("updated {}s ago", d.as_secs()))
+                        .unwrap_or_else(|| "waiting for metrics".into()),
                     dim,
-                ));
+                );
             }
         },
     }
-    spans.push(Span::styled("  │  ? help", dim));
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    fact("? help".to_string(), dim);
+    facts.push(Span::raw(" "));
+
+    let right_width = facts
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum::<usize>() as u16;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(right_width)])
+        .split(area);
+    let message = truncate(&app.status.text, cols[0].width.saturating_sub(2) as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {message}"), kind_style))),
+        cols[0],
+    );
+    f.render_widget(Paragraph::new(Line::from(facts)), cols[1]);
 }
 
 /// The slice of a `len`-row table that is on screen with `selected`
@@ -761,19 +731,53 @@ mod render_tests {
     }
 
     #[tokio::test]
-    async fn the_header_shows_identity_capabilities_and_the_promise() {
+    async fn the_header_says_where_you_are_in_words() {
         let mut app = test_app(Config::default());
         let screen = render(&mut app, 160, 30);
         let header = screen[..5].join("\n");
         assert!(header.contains(" kscope "), "{header}");
-        assert!(header.contains(":pods"), "{header}");
-        assert!(header.contains("stg-eu"), "{header}");
-        for chip in ["logs", "metrics", "events", "describe", "fleet", "triage"] {
-            assert!(header.contains(chip), "missing chip {chip}:\n{header}");
-        }
         assert!(header.contains("read-only"), "{header}");
+        assert!(header.contains("context  ● stg-eu"), "{header}");
+        assert!(header.contains("showing  pods in default"), "{header}");
+        assert!(
+            header.contains("health   0 items · 0 problems · 0 warnings"),
+            "{header}"
+        );
         // The binoculars: two objective lenses side by side.
         assert!(header.contains("▜█▄▄▄█▛ ▜█▄▄▄█▛"), "{header}");
+
+        app.problems_only = true;
+        let header = render(&mut app, 160, 30)[..5].join("\n");
+        assert!(
+            header.contains("pods in default · only problems"),
+            "{header}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shortcut_descriptions_line_up_within_a_column() {
+        let mut app = test_app(Config::default());
+        let screen = render(&mut app, 160, 30);
+        // The first shortcut column holds Enter, `m e d`, `/`, `!` and `:`.
+        let starts: Vec<usize> = [
+            "open logs",
+            "metrics, events, yaml",
+            "filter by name",
+            "only problems",
+        ]
+        .iter()
+        .map(|desc| {
+            let row = screen[..5].iter().find(|r| r.contains(desc)).expect(desc);
+            // Columns are counted in characters, not bytes: the gauges are
+            // multi-byte.
+            row[..row.find(desc).unwrap()].chars().count()
+        })
+        .collect();
+        assert!(
+            starts.windows(2).all(|w| w[0] == w[1]),
+            "{starts:?}\n{}",
+            screen[..5].join("\n")
+        );
     }
 
     #[tokio::test]
@@ -784,18 +788,30 @@ mod render_tests {
             let header = screen[..5].join("\n");
             // Help and quit are always kept.
             assert!(
-                header.contains("help") && header.contains("quit"),
+                header.contains("all keys") && header.contains("quit"),
                 "{width}:\n{header}"
             );
-            // No chip is cut mid-word: each name that appears is whole.
-            for chip in ["describe", "metrics"] {
-                let cut = &chip[..chip.len() - 1];
+            // No description is cut mid-word.
+            for desc in ["label selector", "resource type", "namespace"] {
+                let cut = &desc[..desc.len() - 2];
                 assert!(
-                    !header.contains(cut) || header.contains(chip),
-                    "{width}: {chip} cut:\n{header}"
+                    !header.contains(cut) || header.contains(desc),
+                    "{width}: {desc} cut:\n{header}"
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_status_bar_only_states_what_says_something() {
+        let mut app = test_app(Config::default());
+        let screen = render(&mut app, 160, 30);
+        let status = &screen[29];
+        assert!(status.trim_end().ends_with("0 pods · ? help"), "{status}");
+        assert!(
+            !status.contains("drop:") && !status.contains("filter"),
+            "{status}"
+        );
     }
 
     #[tokio::test]
@@ -817,7 +833,7 @@ mod render_tests {
             failed: vec![],
         }));
         let screen = render(&mut app, 160, 30).join("\n");
-        assert!(screen.contains("◆ stg 2/2"), "{screen}");
+        assert!(screen.contains("fleet stg 2/2 clusters"), "{screen}");
         assert!(screen.contains("fleet stg"), "{screen}");
         assert!(screen.contains("context"), "{screen}");
         assert!(

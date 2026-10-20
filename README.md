@@ -21,8 +21,8 @@ has to be anything else.
     <td colspan="2"><img src="assets/screenshots/fleet.png" alt="Two staging clusters listed as one, with a context column and a crash-looping pod flagged in red"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="assets/screenshots/logs.png" alt="Two replicas of a deployment merged into one log, with an ERROR search highlighting 101 hits"></td>
-    <td width="50%"><img src="assets/screenshots/monitoring.png" alt="CPU and memory of a deployment on another cluster of the fleet"></td>
+    <td width="50%"><img src="assets/screenshots/logs.png" alt="Two replicas of a deployment merged into one log, searched for ERROR"></td>
+    <td width="50%"><img src="assets/screenshots/metrics.png" alt="CPU and memory of a deployment on another cluster of the fleet"></td>
   </tr>
   <tr>
     <td colspan="2" align="center"><sub>Real screens. <code>kscope -u stg -n shop</code> lists both staging clusters as one.
@@ -41,7 +41,7 @@ Two panes, and one key that drives everything:
 │   staging  ││ payments   ledger-58f4       0/1       12m  │
 └────────────┘└─────────────────────────────────────────────┘
                              Enter ↓
-┌─ contexts ─┐┌ payments/ledger-58f4  l:logs m:monitoring E:events  d: describe ┐
+┌─ contexts ─┐┌ payments/ledger-58f4   l logs  m metrics  e events  d describe ┐
 │ ● prod-eu  ││ 12:04:11  WARN  retrying payment authorisation                  │
 └────────────┘└─────────────────────────────────────────────────────────────────┘
 ```
@@ -53,7 +53,7 @@ Two panes, and one key that drives everything:
 * **The left pane lists your kubeconfig contexts.** `Enter` switches cluster in
   place — the client is rebuilt and every poller restarts, without restarting
   kscope.
-* **`Enter` opens an object's logs**, `m` its monitoring, `E` its events, and
+* **`Enter` opens an object's logs**, `m` its metrics, `e` its events, and
   `d` describes it in an overlay. `Esc` steps back out. Everything is scoped to
   what you opened: a Deployment streams all its replicas *and* totals their CPU
   and memory, a Service follows what it selects, a Node shows its kubelet
@@ -77,8 +77,8 @@ one screen:
   claim shows **how full it actually is** — a figure the Kubernetes API does not
   carry at all.
 * **Events** — scoped to the object you have open, warnings separable with one
-  key, so "why is this pending?" is one `3` away.
-* **Triage** — `!` narrows any listing to just the objects in trouble, reading
+  key, so "why is this pending?" is one `e` away.
+* **Only problems** — `!` narrows any listing to just the objects in trouble, reading
   the real container state rather than the phase: a pod stuck in
   `CrashLoopBackOff` still reports phase `Running`, and that is exactly the one
   you need to find.
@@ -185,10 +185,10 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | Key | Action |
 | --- | --- |
 | `Enter`, `l` | open the object's logs |
-| `m` / `E` | open its monitoring / events |
+| `m` / `e` | open its metrics / events |
 | `d` | describe it, as an overlay (`d` or `Esc` closes) |
 | `/` | filter the list by name or namespace |
-| `!` | show only the objects in trouble |
+| `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
 | `Ctrl-r` | re-list now |
 
@@ -206,8 +206,8 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | --- | --- |
 | `/` then `n` / `N` | regex search, next / previous match |
 | `\` | filter lines; prefix with `!` to exclude |
-| `L` / `e` | cycle minimum level / errors only |
-| `l` / `m` / `E` | switch to logs / monitoring / events |
+| `L` | minimum level: all → DEBUG → INFO → WARN → ERROR → FATAL |
+| `l` / `m` / `e` | switch to logs / metrics / events |
 | `F` / `w` | toggle follow / wrapping |
 | `t` / `p` | toggle timestamps / previous (crashed) container |
 | `c` / `s` | clear buffer / save visible buffer to a file |
@@ -215,7 +215,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
 
-### Detail — `m` monitoring, `E` events, `d` describe
+### Detail — `m` metrics, `e` events, `d` describe
 
 | Key | Action |
 | --- | --- |
@@ -280,9 +280,9 @@ member at once**, with a `context` column. With the config above:
 
 * **Search**: `/` filters by name, namespace *or* context across every member;
   `:deploy`, `!` and `L` work exactly as on one cluster.
-* **Open**: `Enter`, `l`, `m`, `E` or `d` on a row from another cluster
+* **Open**: `Enter`, `l`, `m`, `e` or `d` on a row from another cluster
   switches kscope to that cluster and opens the object there — logs,
-  monitoring, events and describe always come from the cluster the row lives
+  metrics, events and describe always come from the cluster the row lives
   on. `Esc` brings you back to the fleet-wide list, still filtered.
 * **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
   and globs as `-u`.

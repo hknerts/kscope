@@ -210,7 +210,7 @@ fn timestamp_len(raw: &str) -> u16 {
 }
 
 /// Active filter over the buffer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Filter {
     /// Minimum severity to display.
     pub min_level: Level,
@@ -220,6 +220,20 @@ pub struct Filter {
     pub include: Option<Regex>,
     /// Optional exclude filter, applied after `include`.
     pub exclude: Option<Regex>,
+}
+
+/// Show everything. `Level`'s own default is `Info` (what an unclassified
+/// line is), and deriving this used to hide every DEBUG and TRACE line from
+/// the start, without the user ever having asked for it.
+impl Default for Filter {
+    fn default() -> Self {
+        Self {
+            min_level: Level::Trace,
+            errors_only: false,
+            include: None,
+            exclude: None,
+        }
+    }
 }
 
 impl Filter {
@@ -597,6 +611,18 @@ mod tests {
 
     fn line(s: &str) -> LogLine {
         LogLine::new(s.to_string(), Arc::from("test"))
+    }
+
+    #[test]
+    fn the_default_filter_shows_every_level() {
+        let filter = Filter::default();
+        assert!(!filter.is_active());
+        assert!(filter.accepts(&line("DEBUG cache hit")));
+        assert!(filter.accepts(&line("TRACE entering parse")));
+        let mut buffer = LogBuffer::new(0);
+        buffer.push(line("DEBUG cache hit"));
+        buffer.push(line("INFO ready"));
+        assert_eq!(buffer.view_len(), 2);
     }
 
     #[test]

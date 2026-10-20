@@ -11,72 +11,52 @@ use crate::config::Theme;
 
 const BINDINGS: &[(&str, &[(&str, &str)])] = &[
     (
-        "resources",
+        "the list",
         &[
-            (":", "pick a resource type (pods, deploy, svc, crds…)"),
-            ("Tab", "accept the completion / cycle matches"),
-            ("↑ / ↓", "move through the completions"),
-            ("Enter / l", "open the object's logs"),
-            ("d", "describe it (overlay; d or Esc closes)"),
-            ("m / E", "monitoring / events for it"),
-            ("/", "filter the list by name or namespace"),
-            ("!", "show only the objects in trouble"),
-            ("L", "set a label selector"),
-            ("Ctrl-n", "change the namespace scope"),
-            ("Ctrl-r", "re-list now"),
-        ],
-    ),
-    (
-        "general",
-        &[
-            ("q / Ctrl-c", "quit"),
-            ("Esc", "leave the detail view, then quit"),
-            ("?", "toggle this help"),
-            ("Tab", "move focus between contexts and resources"),
+            ("Enter  l", "open the selected object's logs"),
+            ("m  e  d", "its metrics, events, or YAML (describe)"),
+            ("/", "filter by name, namespace or cluster"),
             (
-                "Enter",
-                "on a context: switch cluster; on a fleet: list all its members",
+                "!",
+                "only problems: crash loops, pending, not ready, failed",
             ),
-            (
-                "/ (contexts)",
-                "browse an ad-hoc fleet: context globs, e.g. stg-*",
-            ),
+            (":", "pick a resource type (pods, deploy, svc, CRDs…)"),
+            ("L", "label selector, e.g. app=api,tier!=batch"),
+            ("Ctrl-n", "namespace (empty or * for all)"),
+            ("Ctrl-r", "refresh now"),
         ],
     ),
     (
-        "navigation",
+        "clusters (Tab to the left pane)",
         &[
-            ("j / k / ↑ / ↓", "move one row or line"),
-            ("Ctrl-d / Ctrl-u", "half page down / up"),
-            ("Ctrl-f / PgDn", "page down"),
-            ("Ctrl-b / PgUp", "page up"),
-            ("g / Home", "jump to the top"),
-            ("G / End", "jump to the bottom and follow"),
-            ("[ / ]", "horizontal scroll (nowrap mode)"),
+            ("Enter", "switch to that cluster, or open that fleet"),
+            ("/", "open a fleet by name or pattern: stg, prod-*, a,b"),
         ],
     ),
     (
-        "detail: l logs",
+        "logs",
         &[
-            ("/", "search (regex, smart case)"),
-            ("n / N", "next / previous match"),
-            ("\\", "filter lines (prefix ! to exclude)"),
-            ("L", "cycle the minimum level"),
-            ("e", "errors only"),
-            ("F / w", "follow / line wrapping"),
-            ("t / p", "timestamps / previous container"),
-            ("c / s", "clear buffer / save to file"),
-            ("x", "detach all streams"),
+            ("/  n  N", "search (regex, smart case), next, previous"),
+            ("\\", "keep matching lines; prefix ! to drop them"),
+            ("L", "minimum level: all, DEBUG, INFO, WARN, ERROR, FATAL"),
+            ("F  w", "follow the tail, wrap long lines"),
+            ("t  p", "timestamps, previous (crashed) container"),
+            ("s  c", "save what is shown to a file, clear"),
+            ("v", "on a node: kubelet, containerd or kernel log"),
         ],
     ),
     (
-        "detail: m monitoring, E events, d describe",
+        "metrics and events",
+        &[("S", "sort by name, cpu or memory"), ("W", "warnings only")],
+    ),
+    (
+        "everywhere",
         &[
-            ("m", "monitoring, scoped to the open object"),
-            ("S", "cycle sort: name / cpu / memory"),
-            ("E", "events for the open object"),
-            ("W", "events: warnings only"),
-            ("d", "describe as YAML; j/k/g/G scroll it"),
+            ("j k  ↑ ↓", "move;  Ctrl-d/u half page,  g/G top/bottom"),
+            ("Tab", "between clusters and the list"),
+            ("Esc", "back one step: describe, then the object, then quit"),
+            ("?", "this help"),
+            ("q  Ctrl-c", "quit"),
         ],
     ),
 ];
@@ -97,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(format!(" {section}"), heading)));
         for (k, description) in *entries {
             lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<18}"), key),
+                Span::styled(format!("   {k:<12}"), key),
                 Span::raw(*description),
             ]));
         }

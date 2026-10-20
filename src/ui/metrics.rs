@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focus()))
-        .title(format!(" monitoring · {} ", subject(app)));
+        .title(format!(" metrics · {} ", subject(app)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 

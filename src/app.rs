@@ -1596,7 +1596,9 @@ impl App {
             }
             KeyCode::Char('l') => self.set_view(View::Logs),
             KeyCode::Char('m') => self.set_view(View::Metrics),
-            KeyCode::Char('E') => self.set_view(View::Events),
+            // `e` is events, like `l` logs and `m` metrics; `E` still works
+            // for anyone used to the old binding.
+            KeyCode::Char('e') | KeyCode::Char('E') => self.set_view(View::Events),
             KeyCode::Char('d') => self.toggle_describe(),
 
             // navigation
@@ -1660,21 +1662,15 @@ impl App {
                 let mut filter = self.buffer.filter.clone();
                 filter.min_level = Level::next_threshold(filter.min_level);
                 let label = filter.min_level.label();
+                let everything = filter.min_level == Level::Trace;
                 self.buffer.set_filter(filter);
                 self.scroll_to_bottom();
-                self.set_status(format!("level >= {label}"), StatusKind::Info);
-            }
-            KeyCode::Char('e') => {
-                let mut filter = self.buffer.filter.clone();
-                filter.errors_only = !filter.errors_only;
-                let on = filter.errors_only;
-                self.buffer.set_filter(filter);
-                self.scroll_to_bottom();
+                // `L` up to ERROR is what "errors only" used to be.
                 self.set_status(
-                    if on {
-                        "showing errors only"
+                    if everything {
+                        "showing every level — L to narrow".to_string()
                     } else {
-                        "showing all levels"
+                        format!("showing {label} and above — L for the next level")
                     },
                     StatusKind::Info,
                 );
@@ -1712,12 +1708,13 @@ impl App {
                 self.set_status(
                     if self.problems_only {
                         format!(
-                            "problems only — {} of {}",
+                            "showing only {} with problems: {} of {} — ! to show all",
+                            self.resource_label(),
                             self.row_view.len(),
                             self.rows.len()
                         )
                     } else {
-                        format!("all {} {}", self.rows.len(), self.resource_label())
+                        format!("showing all {} {}", self.rows.len(), self.resource_label())
                     },
                     StatusKind::Info,
                 );
