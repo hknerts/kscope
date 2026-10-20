@@ -21,6 +21,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With a capped log buffer, evicting old lines no longer moves the search
   cursor (`n`/`N`) and the scroll position onto different lines.
 - Switching context keeps "all namespaces" when kscope was started with `-A`.
+- `kscope -u stg -n shop` lists only `shop`. A fleet given on the command
+  line used to switch to all namespaces regardless of `-n`.
+- Opening a row from another fleet member said "no pods behind this
+  deployment" while the new cluster's pods were still loading. It now says
+  "waiting for the pod inventory…". The contexts pane cursor also follows the
+  switch.
+
+### Security
+
+- Update `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 for
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0383: certificate paths through the
+  distrusted emSign intermediates are rejected.
 
 ### Changed
 

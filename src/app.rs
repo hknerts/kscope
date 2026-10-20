@@ -240,6 +240,9 @@ pub struct App {
     pub palette: Palette,
 
     pub inventory: Inventory,
+    /// Whether the connected context's first inventory snapshot has arrived.
+    /// Until it has, "no pods behind this object" would be a false alarm.
+    pub inventory_ready: bool,
 
     // --------------------------------------------------------------- events
     pub events: Vec<EventInfo>,
@@ -369,6 +372,7 @@ impl App {
             input: String::new(),
             palette: Palette::default(),
             inventory: Inventory::default(),
+            inventory_ready: false,
             events: Vec::new(),
             event_view: Vec::new(),
             event_selected: 0,
@@ -654,13 +658,20 @@ impl App {
 
     /// Browse `fleet`: list the current kind on every member. The connected
     /// context stays as it is until a row from another member is opened.
+    ///
+    /// Picked in the TUI, a fleet spans every namespace — it is for finding
+    /// things wherever they are, and `Ctrl-n` narrows it. Started from the
+    /// command line, it keeps the scope `-n`/`-A` gave it.
     pub fn enter_fleet(&mut self, fleet: Fleet) {
-        // A fleet is for finding things wherever they are; the namespace
-        // can still be narrowed with Ctrl-n afterwards.
         if self.scope != Scope::AllNamespaces {
             self.scope = Scope::AllNamespaces;
             self.pollers_stale = true;
         }
+        self.open_fleet(fleet);
+    }
+
+    /// [`App::enter_fleet`] without touching the namespace scope.
+    pub fn open_fleet(&mut self, fleet: Fleet) {
         self.set_status(
             format!(
                 "fleet {}: {} ({} contexts)",
@@ -713,7 +724,17 @@ impl App {
         self.user_name = user_name;
         self.k8s_version = k8s_version;
         self.inventory = Inventory::default();
+        self.inventory_ready = false;
         self.metrics = MetricsStore::new(self.config.metrics.history);
+        // The pane's cursor follows the cluster actually connected to, so a
+        // switch made from a fleet row is visible on the left too.
+        if let Some(i) = self
+            .contexts
+            .iter()
+            .position(|c| c.name == self.context_name)
+        {
+            self.context_selected = self.fleets.len() + i;
+        }
         self.events.clear();
         self.event_view.clear();
         self.events_error = None;
@@ -765,6 +786,7 @@ impl App {
         match update {
             Update::Inventory(inv) => {
                 self.inventory = *inv;
+                self.inventory_ready = true;
                 self.reconcile_metrics_metadata();
                 // The inventory can land after the user has already opened a
                 // pod, in which case the first attach found nothing to do.
@@ -1258,6 +1280,10 @@ impl App {
                 format!("membership changed: +{opened} -{dropped} containers"),
                 StatusKind::Info,
             );
+        } else if self.attached.is_empty() && !self.inventory_ready {
+            // Right after connecting the pod list is still on its way; the
+            // inventory update re-runs this and attaches.
+            self.set_status("waiting for the pod inventory…", StatusKind::Info);
         } else if self.attached.is_empty() {
             let hint = match self.current_type() {
                 Some(t) if !self.selector.is_empty() => {
@@ -2314,6 +2340,45 @@ pub(crate) mod tests {
             .as_deref()
             .unwrap()
             .contains("no fleet member answered"));
+    }
+
+    #[tokio::test]
+    async fn a_fleet_from_the_command_line_keeps_its_namespace() {
+        let mut app = test_app(Config::default());
+        app.scope = Scope::Namespace("shop".into());
+        app.open_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        assert_eq!(app.scope, Scope::Namespace("shop".into()));
+        assert!(!app.pollers_stale);
+        // Picked in the TUI, a fleet spans every namespace.
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        assert_eq!(app.scope, Scope::AllNamespaces);
+    }
+
+    #[tokio::test]
+    async fn after_a_switch_the_pane_cursor_and_status_tell_the_truth() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-us", "api-2")],
+            failed: vec![],
+        }));
+        app.activate_selection();
+        let context = app.pending_context.take().unwrap();
+        let scope = app.scope.clone();
+        app.adopt_context(offline_client(), scope, context, "me".into(), "v".into());
+        // stg-us is the second context; no configured fleets precede it.
+        assert_eq!(app.context_selected, 1);
+        // The pod inventory has not arrived yet: that is not "no pods".
+        assert_eq!(app.status.text, "waiting for the pod inventory…");
     }
 
     #[tokio::test]

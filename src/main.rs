@@ -410,10 +410,8 @@ async fn run(
     }
     app.start_kind = start.kind;
     if let Some(fleet) = start.fleet {
-        app.enter_fleet(fleet);
-        // Entering a fleet asks for the pollers to be re-scoped, but these
-        // were spawned against the right scope a moment ago.
-        app.pollers_stale = false;
+        // The scope was already worked out from -n / -A for a fleet.
+        app.open_fleet(fleet);
     }
     spawn_discovery(&app.client, &app.context_name, type_tx.clone());
 

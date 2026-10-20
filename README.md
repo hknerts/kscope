@@ -1,11 +1,13 @@
 # kscope
 
-**A fast, read-only Kubernetes TUI: browse any resource, then read its logs, metrics and events.**
+**A fast, read-only Kubernetes TUI: browse any resource, then read its logs, metrics and events, on one cluster or across many at once.**
 
 [![CI](https://github.com/hknerts/kscope/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/hknerts/kscope/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hknerts/kscope?logo=github&color=blue)](https://github.com/hknerts/kscope/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/rustc-1.89%2B-orange.svg)](https://www.rust-lang.org)
+[![Good first issues](https://img.shields.io/github/issues/hknerts/kscope/good%20first%20issue?label=good%20first%20issues&color=7057ff)](https://github.com/hknerts/kscope/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+[![Discussions](https://img.shields.io/github/discussions/hknerts/kscope?color=0e8a16)](https://github.com/hknerts/kscope/discussions)
 
 kscope is deliberately **read-only**. There is no editing, scaling, deleting or
 shelling in. That is the point: it is safe to hand to anyone holding a view-only
@@ -13,6 +15,20 @@ token, it cannot be the cause of an incident, and it stays fast because it never
 has to be anything else.
 
 ![kscope](assets/banner.png)
+
+<table>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/fleet.png" alt="Two staging clusters listed as one, with a context column and a crash-looping pod flagged in red"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/logs.png" alt="Two replicas of a deployment merged into one log, with an ERROR search highlighting 101 hits"></td>
+    <td width="50%"><img src="assets/screenshots/monitoring.png" alt="CPU and memory of a deployment on another cluster of the fleet"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center"><sub>Real screens. <code>kscope -u stg -n shop</code> lists both staging clusters as one.
+    <code>Enter</code> on a deployment merges its replicas' logs, wherever they run. <code>m</code> shows what they use.</sub></td>
+  </tr>
+</table>
 
 ## How it works
 
@@ -100,8 +116,10 @@ Binaries for Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) and Windows
 are attached to every [release](https://github.com/hknerts/kscope/releases).
 
 ```sh
-curl -sSfL https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install kscope /usr/local/bin/
+curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz
+curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz.sha256
+shasum -a 256 -c kscope-x86_64-unknown-linux-gnu.tar.gz.sha256   # from the next release on
+tar xzf kscope-x86_64-unknown-linux-gnu.tar.gz && sudo install kscope /usr/local/bin/
 ```
 
 ### From source
@@ -467,9 +485,28 @@ The design targets pods that emit tens of thousands of lines per second:
 
 ## Contributing
 
-Bug reports, feature requests and pull requests are welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md). Everyone participating is expected to follow
-the [Code of Conduct](CODE_OF_CONDUCT.md).
+kscope is small enough to understand in an afternoon, and there is plenty to
+build. You can go from clone to a four-cluster playground in five minutes:
+
+```sh
+git clone https://github.com/hknerts/kscope && cd kscope
+make dev-up            # 4 local kind clusters with workloads that log and crash
+cargo run -- -u stg    # you are now browsing two clusters at once
+```
+
+* **Pick something:** the [good first issues](https://github.com/hknerts/kscope/issues?q=is%3Aopen+label%3A%22good+first+issue%22)
+  each say why the change matters, which file to start in, and when it counts
+  as done. [Help wanted](https://github.com/hknerts/kscope/issues?q=is%3Aopen+label%3A%22help+wanted%22)
+  has bigger ones: CronJob logs, kubectl's server-side columns, Homebrew and
+  krew packages.
+* **Ask anything** in [Discussions](https://github.com/hknerts/kscope/discussions),
+  including half-formed ideas.
+* **How it fits together:** [CONTRIBUTING.md](CONTRIBUTING.md) has a map of the
+  code and shows how to test state, rendering and real clusters.
+  [ARCHITECTURE.md](docs/ARCHITECTURE.md) explains why it is built this way.
+
+The one rule is that kscope stays read-only. Everyone taking part is expected to
+follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
