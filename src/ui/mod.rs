@@ -734,3 +734,95 @@ mod tests {
         assert_eq!(truncate("averylongpodname", 8), "averylo…");
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::app::tests::test_app;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::k8s::fleet::{Fleet, Listing};
+    use crate::k8s::resources::ResourceRow;
+
+    /// Draw one frame and return it as plain text, one string per row.
+    fn render(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| super::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_header_shows_identity_capabilities_and_the_promise() {
+        let mut app = test_app(Config::default());
+        let screen = render(&mut app, 160, 30);
+        let header = screen[..5].join("\n");
+        assert!(header.contains(" kscope "), "{header}");
+        assert!(header.contains(":pods"), "{header}");
+        assert!(header.contains("stg-eu"), "{header}");
+        for chip in ["logs", "metrics", "events", "describe", "fleet", "triage"] {
+            assert!(header.contains(chip), "missing chip {chip}:\n{header}");
+        }
+        assert!(header.contains("read-only"), "{header}");
+        // The binoculars: two objective lenses side by side.
+        assert!(header.contains("▜█▄▄▄█▛ ▜█▄▄▄█▛"), "{header}");
+    }
+
+    #[tokio::test]
+    async fn a_narrow_terminal_drops_whole_columns_instead_of_cutting_them() {
+        let mut app = test_app(Config::default());
+        for width in [90u16, 110, 130] {
+            let screen = render(&mut app, width, 24);
+            let header = screen[..5].join("\n");
+            // Help and quit are always kept.
+            assert!(
+                header.contains("help") && header.contains("quit"),
+                "{width}:\n{header}"
+            );
+            // No chip is cut mid-word: each name that appears is whole.
+            for chip in ["describe", "metrics"] {
+                let cut = &chip[..chip.len() - 1];
+                assert!(
+                    !header.contains(cut) || header.contains(chip),
+                    "{width}: {chip} cut:\n{header}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fleet_list_has_a_context_column_and_a_fleet_badge() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        let row = |context: &str, name: &str| ResourceRow {
+            context: context.into(),
+            namespace: "shop".into(),
+            name: name.into(),
+            status: "Running".into(),
+            ..Default::default()
+        };
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "checkout-1"), row("stg-us", "checkout-2")],
+            failed: vec![],
+        }));
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(screen.contains("◆ stg 2/2"), "{screen}");
+        assert!(screen.contains("fleet stg"), "{screen}");
+        assert!(screen.contains("context"), "{screen}");
+        assert!(
+            screen.contains("stg-us") && screen.contains("checkout-2"),
+            "{screen}"
+        );
+    }
+}

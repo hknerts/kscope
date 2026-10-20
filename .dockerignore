@@ -3,3 +3,6 @@ target
 .github
 docs
 *.log
+# The image pins its own toolchain; a "stable" channel file would make rustup
+# fetch a second one, without the cross target added above.
+rust-toolchain.toml

@@ -15,7 +15,10 @@ pub mod selection;
 pub mod volume_stats;
 pub mod watch;
 
-use anyhow::{Context, Result};
+use std::future::Future;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 
 /// Connect to the cluster, honouring `--context` and the usual kubeconfig or
@@ -59,15 +62,65 @@ pub async fn connect(context: Option<&str>) -> Result<(kube::Client, String, Str
     Ok((client, namespace, context_name, user_name))
 }
 
+/// Ceiling on any one-shot request (a listing, a describe, discovery…).
+///
+/// kube's client has a connect timeout but no read timeout — it cannot, as
+/// watches and log streams legitimately stay open for hours. So an API server
+/// that accepts the connection and then never answers would hang a request
+/// forever, and because kscope never overlaps two listings, the list would
+/// silently stop refreshing. Every one-shot call goes through [`bounded`].
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connecting can run an exec credential plugin, which may open a browser
+/// for an SSO login; give a human time to finish it.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Run `request`, failing it after `limit` instead of waiting indefinitely.
+pub async fn bounded_by<T>(limit: Duration, request: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(limit, request)
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow!(
+                "no answer from the API server in {}s",
+                limit.as_secs()
+            ))
+        })
+}
+
+/// [`bounded_by`] with [`REQUEST_TIMEOUT`].
+pub async fn bounded<T>(request: impl Future<Output = Result<T>>) -> Result<T> {
+    bounded_by(REQUEST_TIMEOUT, request).await
+}
+
 /// Best-effort apiserver version string (e.g. "v1.30.2"), for the header.
 /// Never fails the whole app — an unreachable `/version` endpoint just shows
 /// as "unknown".
 pub async fn server_version(client: &kube::Client) -> String {
-    client
-        .apiserver_version()
+    bounded(async { Ok(client.apiserver_version().await?) })
         .await
         .map(|info| info.git_version)
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_that_never_answers_fails_instead_of_hanging() {
+        let never = std::future::pending::<Result<()>>();
+        let err = bounded_by(Duration::from_secs(5), never).await.unwrap_err();
+        assert!(err.to_string().contains("no answer"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_answer_passes_through() {
+        assert_eq!(bounded(async { Ok(7) }).await.unwrap(), 7);
+        let err = bounded(async { Err::<(), _>(anyhow!("forbidden")) })
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "forbidden");
+    }
 }
 
 /// A container inside a pod, as seen by the inventory poller.
