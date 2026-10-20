@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-21
+
 ### Fixed
 
 - **An API server that stops answering no longer freezes kscope.** kube's
