@@ -180,7 +180,7 @@ async fn find(
     needle: &str,
 ) -> Result<bool> {
     let client = clients.get(context_name).await?;
-    let types = k8s::resources::discover(&client)
+    let types = k8s::bounded(k8s::resources::discover(&client))
         .await
         .context("discovering resource types")?;
     let kind = k8s::resources::resolve(&types, kind)
@@ -362,7 +362,7 @@ async fn run(
     let (ver_tx, mut ver_rx) = tokio::sync::mpsc::channel::<(String, String)>(2);
     type Switched = Result<(kube::Client, String, String, String), (String, String)>;
     let (ctx_tx, mut ctx_rx) = tokio::sync::mpsc::channel::<Switched>(2);
-    let (type_tx, mut type_rx) = tokio::sync::mpsc::channel::<Vec<ResourceType>>(4);
+    let (type_tx, mut type_rx) = tokio::sync::mpsc::channel::<(String, Vec<ResourceType>)>(4);
     // Node journals are a one-shot fetch rather than a stream.
     type NodeLogs = (String, &'static str, Result<String, String>);
     let (node_tx, mut node_rx) = tokio::sync::mpsc::channel::<NodeLogs>(4);
@@ -415,7 +415,7 @@ async fn run(
         // were spawned against the right scope a moment ago.
         app.pollers_stale = false;
     }
-    spawn_discovery(&app.client, type_tx.clone());
+    spawn_discovery(&app.client, &app.context_name, type_tx.clone());
 
     // Draw once immediately so the user sees the shell before the first poll.
     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -431,6 +431,10 @@ async fn run(
     let mut listing: Option<String> = None;
     let mut last_listed = Instant::now();
     let list_refresh = Duration::from_millis(app.config.general.inventory_refresh_ms.max(1000));
+    // A fleet listing is a full LIST on every member, so it refreshes less
+    // eagerly than a single cluster's: N clusters × thousands of pods every
+    // five seconds is real load on the API servers for little gain.
+    let fleet_refresh = list_refresh.max(FLEET_REFRESH);
 
     loop {
         let next_frame = tokio::time::Instant::from_std(last_draw + frame_budget);
@@ -442,9 +446,13 @@ async fn run(
             Some(batch) = log_rx.recv() => app.on_log(batch),
             Some(sample) = met_rx.recv() => app.on_metrics(sample),
             Some(events) = evt_rx.recv() => app.on_events(events),
-            Some(types) = type_rx.recv() => {
-                app.on_resource_types(types);
-                app.request_rows();
+            Some((context, types)) = type_rx.recv() => {
+                // A catalogue from the cluster just switched away from would
+                // offer kinds the new one may not serve.
+                if context == app.context_name {
+                    app.on_resource_types(types);
+                    app.request_rows();
+                }
             }
             Some((key, rows)) = row_rx.recv() => {
                 listing = None;
@@ -467,9 +475,10 @@ async fn run(
                 Ok((new_client, default_ns, new_context, new_user)) => {
                     pollers.abort();
                     fleet_clients.insert(&new_context, new_client.clone()).await;
-                    // Moving within a fleet keeps the fleet's scope; leaving
-                    // for a single context lands on its own namespace.
-                    let new_scope = if app.fleet.is_some() {
+                    // Moving within a fleet keeps the fleet's scope, and so
+                    // does "all namespaces" (`-A`); otherwise land on the new
+                    // context's own namespace.
+                    let new_scope = if app.fleet.is_some() || app.scope == Scope::AllNamespaces {
                         app.scope.clone()
                     } else {
                         Scope::Namespace(default_ns)
@@ -482,7 +491,7 @@ async fn run(
                         met_tx.clone(),
                         evt_tx.clone(),
                     );
-                    spawn_discovery(&new_client, type_tx.clone());
+                    spawn_discovery(&new_client, &new_context, type_tx.clone());
                     spawn_version(&new_client, &new_context, ver_tx.clone());
                     app.adopt_context(new_client, new_scope, new_context, new_user, "…".into());
                     listing = None;
@@ -511,7 +520,7 @@ async fn run(
         if let Some(context) = app.pending_context.take() {
             let tx = ctx_tx.clone();
             tokio::spawn(async move {
-                let result = k8s::connect(Some(&context))
+                let result = k8s::bounded_by(k8s::CONNECT_TIMEOUT, k8s::connect(Some(&context)))
                     .await
                     .map_err(|err| (context, format!("{err:#}")));
                 let _ = tx.send(result).await;
@@ -536,7 +545,7 @@ async fn run(
             let client = app.client.clone();
             let tx = desc_tx.clone();
             tokio::spawn(async move {
-                let result = k8s::resources::get(&client, &kind, &namespace, &name)
+                let result = k8s::bounded(k8s::resources::get(&client, &kind, &namespace, &name))
                     .await
                     .map_err(|e| format!("describing {name}: {e}"));
                 let _ = tx.send(result).await;
@@ -549,7 +558,7 @@ async fn run(
             let nodes: Vec<String> = app.inventory.nodes.iter().map(|n| n.name.clone()).collect();
             let tx = vol_tx.clone();
             tokio::spawn(async move {
-                let result = k8s::volume_stats::collect(&client, &nodes)
+                let result = k8s::bounded(k8s::volume_stats::collect(&client, &nodes))
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(result).await;
@@ -562,21 +571,30 @@ async fn run(
             let tail = app.config.logs.tail_lines;
             let tx = node_tx.clone();
             tokio::spawn(async move {
-                let result =
-                    k8s::node_logs::fetch(&client, &node, service, Some(tail).filter(|t| *t > 0))
-                        .await
-                        .map_err(|e| format!("{service} logs from {node}: {e}"));
+                let result = k8s::bounded(k8s::node_logs::fetch(
+                    &client,
+                    &node,
+                    service,
+                    Some(tail).filter(|t| *t > 0),
+                ))
+                .await
+                .map_err(|e| format!("{service} logs from {node}: {e}"));
                 let _ = tx.send((node, service, result)).await;
             });
         }
 
+        let refresh_every = if app.fleet.is_some() {
+            fleet_refresh
+        } else {
+            list_refresh
+        };
         // Keep the browsed list live. Only while browsing: in the detail view
         // the selected row *is* the object on screen, and a refresh that
         // dropped it would silently switch what you are looking at.
         if app.right == app::RightMode::Browse
             && listing.is_none()
             && !app.loading
-            && last_listed.elapsed() >= list_refresh
+            && last_listed.elapsed() >= refresh_every
         {
             app.loading = true;
         }
@@ -598,13 +616,15 @@ async fn run(
                             &clients, &members, &kind, &scope, &selector,
                         )
                         .await),
-                        None => k8s::resources::list(&client, &kind, &scope, &selector)
-                            .await
-                            .map(|rows| Listing {
-                                rows,
-                                failed: Vec::new(),
-                            })
-                            .map_err(|e| format!("listing {}: {e}", kind.name())),
+                        None => {
+                            k8s::bounded(k8s::resources::list(&client, &kind, &scope, &selector))
+                                .await
+                                .map(|rows| Listing {
+                                    rows,
+                                    failed: Vec::new(),
+                                })
+                                .map_err(|e| format!("listing {}: {e}", kind.name()))
+                        }
                     };
                     let _ = tx.send((key, result)).await;
                 });
@@ -660,13 +680,32 @@ fn spawn_version(
     });
 }
 
+/// How often a fleet's list is re-fetched while browsing it.
+const FLEET_REFRESH: Duration = Duration::from_secs(15);
+
 /// Discovery is a burst of requests, so it runs off the UI thread and reports
-/// back when it is done. A failure just leaves the palette empty.
-fn spawn_discovery(client: &kube::Client, tx: tokio::sync::mpsc::Sender<Vec<ResourceType>>) {
+/// back when it is done, tagged with the context it describes.
+///
+/// Without a catalogue nothing can be listed at all, so a failure (a flaky
+/// network at start-up, an apiserver mid-restart) is retried with backoff
+/// rather than leaving an empty palette for the rest of the session. It gives
+/// up after a few minutes; the context can always be re-selected.
+fn spawn_discovery(
+    client: &kube::Client,
+    context: &str,
+    tx: tokio::sync::mpsc::Sender<(String, Vec<ResourceType>)>,
+) {
     let client = client.clone();
+    let context = context.to_string();
     tokio::spawn(async move {
-        if let Ok(types) = k8s::resources::discover(&client).await {
-            let _ = tx.send(types).await;
+        let mut wait = Duration::from_secs(2);
+        for _ in 0..8 {
+            if let Ok(types) = k8s::bounded(k8s::resources::discover(&client)).await {
+                let _ = tx.send((context, types)).await;
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(30));
         }
     });
 }

@@ -8,6 +8,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An API server that stops answering no longer freezes kscope.** kube's
+  client has no read timeout, so a listing, describe, discovery or version
+  probe against a server that accepted the connection and then went silent
+  waited forever. Because listings never overlap, the browsed list then
+  stopped refreshing for the rest of the session. One-shot requests now fail
+  after 30 s with "no answer from the API server". A context switch has 120 s,
+  which leaves time for an SSO login in an exec credential plugin.
+- Discovery is retried with backoff when it fails, instead of leaving an empty
+  `:` palette, and nothing could be listed, until the context was re-selected.
+  A late catalogue from a context you already left is ignored.
+- With a capped log buffer, evicting old lines no longer moves the search
+  cursor (`n`/`N`) and the scroll position onto different lines.
+- Switching context keeps "all namespaces" when kscope was started with `-A`.
+
+### Changed
+
+- A fleet's list is refreshed every 15 s instead of every 5 s. Each refresh is
+  a full LIST on every member.
+- Release pages are written from this changelog, and every archive comes with
+  a `.sha256`. The container image cross-compiles arm64 instead of emulating
+  it, so the image is ready minutes after a tag instead of half an hour.
+
 - README: the config file lives in the platform's config directory, which
   on macOS is `~/Library/Application Support/io.kscope.kscope/`, not
   `~/.config/kscope/`.

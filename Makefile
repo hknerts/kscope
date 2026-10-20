@@ -1,4 +1,4 @@
-.PHONY: help build run test lint fmt check audit coverage docker clean install
+.PHONY: help build run test lint fmt check audit coverage docker clean install dev-up dev-down
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -26,6 +26,12 @@ audit: ## Licence and advisory check
 
 docker: ## Build the container image
 	docker build -t kscope:dev .
+
+dev-up: ## Create 4 local kind clusters (2 stg, 2 prod) with workloads
+	hack/dev-clusters.sh up
+
+dev-down: ## Delete the local dev clusters
+	hack/dev-clusters.sh down
 
 install: ## Install into ~/.cargo/bin
 	cargo install --path . --locked

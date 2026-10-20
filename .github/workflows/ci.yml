@@ -56,6 +56,26 @@ jobs:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  container:
+    name: container image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Build both platforms the way a release does, without pushing, so a
+      # broken Dockerfile shows up on the pull request and not on release day.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: The amd64 image runs
+        run: |
+          docker buildx build --load --platform linux/amd64 -t kscope:ci --cache-from type=gha .
+          docker run --rm kscope:ci --version
+
   e2e:
     name: end-to-end against kind
     runs-on: ubuntu-latest

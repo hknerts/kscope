@@ -871,6 +871,10 @@ impl App {
                 // on every batch made an active search O(buffer) per batch.
                 let re = self.search.regex.as_ref();
                 let mut total = self.search.total;
+                // Lines evicted from the front of the view shift every view
+                // index down by one; positions held across the batch have to
+                // shift with them or they point at the wrong line.
+                let mut shifted = 0usize;
                 for line in lines {
                     let line = LogLine::new(line, source.clone());
                     let hit = re.is_some_and(|re| re.is_match(&line.raw));
@@ -878,13 +882,21 @@ impl App {
                     if pushed.shown && hit {
                         total += 1;
                     }
-                    if let (Some(old), Some(re)) = (pushed.evicted, re) {
-                        if re.is_match(&old.raw) {
+                    if let Some(old) = pushed.evicted {
+                        shifted += 1;
+                        if re.is_some_and(|re| re.is_match(&old.raw)) {
                             total = total.saturating_sub(1);
                         }
                     }
                 }
                 self.search.total = total;
+                if shifted > 0 {
+                    // The current match is gone if it was among the evicted.
+                    self.search.current = self.search.current.and_then(|i| i.checked_sub(shifted));
+                    if !self.follow {
+                        self.scroll = self.scroll.saturating_sub(shifted);
+                    }
+                }
                 if self.follow {
                     self.scroll_to_bottom();
                 }
@@ -2122,7 +2134,7 @@ fn line_spans(text: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -2150,5 +2162,172 @@ mod tests {
             level = Level::next_threshold(level);
         }
         assert_eq!(level, Level::Trace);
+    }
+
+    // ---------------------------------------------------------------------
+    // App-level behaviour, against a client that is never actually called.
+
+    fn offline_client() -> kube::Client {
+        let config = kube::Config::new("http://127.0.0.1:9".parse().unwrap());
+        kube::Client::try_from(config).unwrap()
+    }
+
+    fn pods_type() -> ResourceType {
+        ResourceType {
+            api: kube::core::ApiResource {
+                group: String::new(),
+                version: "v1".into(),
+                api_version: "v1".into(),
+                kind: "Pod".into(),
+                plural: "pods".into(),
+            },
+            namespaced: true,
+        }
+    }
+
+    fn row(context: &str, name: &str) -> ResourceRow {
+        ResourceRow {
+            context: context.into(),
+            namespace: "shop".into(),
+            name: name.into(),
+            status: "Running".into(),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn test_app(config: Config) -> App {
+        let (log_tx, _) = tokio::sync::mpsc::channel(16);
+        let contexts = ["stg-eu", "stg-us", "prod-eu"]
+            .iter()
+            .map(|name| ContextEntry {
+                name: name.to_string(),
+                cluster: name.to_string(),
+            })
+            .collect();
+        let mut app = App::new(
+            config,
+            offline_client(),
+            Scope::Namespace("default".into()),
+            log_tx,
+            "stg-eu".into(),
+            "me".into(),
+            "v1.36.1".into(),
+            contexts,
+        );
+        app.on_resource_types(vec![pods_type()]);
+        app
+    }
+
+    fn batch(lines: std::ops::Range<usize>) -> LogEvent {
+        LogEvent::Batch {
+            source: Arc::from("shop/api:app"),
+            lines: lines.map(|i| format!("INFO line {i:04}")).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn eviction_keeps_the_search_cursor_and_scroll_on_their_lines() {
+        let mut config = Config::default();
+        config.logs.buffer_lines = 64; // the smallest ring
+        let mut app = test_app(config);
+        app.follow = false;
+        app.on_log(batch(0..64));
+
+        // Park the cursor on "line 0040" and the scroll on "line 0030".
+        app.search.query = "line 0040".into();
+        app.search.regex = app.compile("line 0040");
+        app.search.current = Some(40);
+        app.scroll = 30;
+
+        // Ten more lines evict ten from the front.
+        app.on_log(batch(64..74));
+        let at = |i: usize| app.buffer.view_line(i).map(|l| l.raw.to_string());
+        assert_eq!(
+            at(app.search.current.unwrap()).as_deref(),
+            Some("INFO line 0040")
+        );
+        assert_eq!(at(app.scroll).as_deref(), Some("INFO line 0030"));
+
+        // Once the matched line itself is evicted there is no current match.
+        app.on_log(batch(74..120));
+        assert_eq!(app.search.current, None);
+    }
+
+    #[tokio::test]
+    async fn opening_a_row_on_another_member_switches_there_first() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        assert_eq!(app.scope, Scope::AllNamespaces);
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api-1"), row("stg-us", "api-2")],
+            failed: vec![],
+        }));
+        // Filtering reaches the context column too.
+        app.row_filter = Some("stg-us".into());
+        app.rebuild_row_view();
+        assert_eq!(app.row_view.len(), 1);
+
+        // Enter on the stg-us row: nothing is fetched from the wrong cluster,
+        // a switch is requested instead.
+        app.activate_selection();
+        assert_eq!(app.pending_context.as_deref(), Some("stg-us"));
+        assert_eq!(app.right, RightMode::Browse);
+        assert!(app.log_target().is_none());
+        assert!(app.take_describe_request().is_none());
+
+        // The switch lands: the fleet list survives and the row opens.
+        let context = app.pending_context.take().unwrap();
+        let scope = app.scope.clone();
+        app.adopt_context(offline_client(), scope, context, "me".into(), "v".into());
+        assert_eq!(app.right, RightMode::Detail);
+        assert_eq!(app.view, View::Logs);
+        assert_eq!(app.selected_row().unwrap().identity(), "stg-us:shop/api-2");
+        assert_eq!(app.rows.len(), 2);
+        assert!(app.log_target().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_fleet_reports_members_that_did_not_answer() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api-1")],
+            failed: vec![("stg-us".into(), "no answer in 10s".into())],
+        }));
+        assert_eq!(app.rows.len(), 1);
+        assert!(app.rows_error.is_none());
+        assert!(app.status.text.contains("stg-us unreachable"));
+
+        // Nobody answering at all is an error, not an empty list.
+        app.on_listing(Ok(Listing {
+            rows: vec![],
+            failed: vec![("stg-eu".into(), "x".into()), ("stg-us".into(), "y".into())],
+        }));
+        assert!(app
+            .rows_error
+            .as_deref()
+            .unwrap()
+            .contains("no fleet member answered"));
+    }
+
+    #[tokio::test]
+    async fn picking_a_single_context_leaves_the_fleet() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        // The pane lists configured fleets first; none here, so index 2 is
+        // the third context.
+        app.context_selected = 2;
+        app.switch_context();
+        assert!(app.fleet.is_none());
+        assert_eq!(app.pending_context.as_deref(), Some("prod-eu"));
     }
 }
