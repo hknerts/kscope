@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-21
+
 ### Changed
 
 - **A calmer, aligned header.** The left side says where you are in labelled
