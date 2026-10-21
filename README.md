@@ -54,7 +54,7 @@ Two panes, and one key that drives everything:
   place — the client is rebuilt and every poller restarts, without restarting
   kscope.
 * **`Enter` opens an object's logs**, `m` its metrics, `e` its events, and
-  `d` describes it in an overlay. `Esc` steps back out. Everything is scoped to
+  `d` describes it in the same pane. `Esc` steps back out. Everything is scoped to
   what you opened: a Deployment streams all its replicas *and* totals their CPU
   and memory, a Service follows what it selects, a Node shows its kubelet
   journal and what is scheduled on it.
@@ -201,7 +201,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | --- | --- |
 | `Enter`, `l` | open the object's logs |
 | `m` / `e` | open its metrics / events |
-| `d` | describe it, as an overlay (`d` or `Esc` closes) |
+| `d` | describe it in the right pane (`d` or `Esc` closes) |
 | `/` | filter the list by name or namespace |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
@@ -236,12 +236,13 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | --- | --- |
 | `S` | cycle sort: name / cpu / memory |
 | `W` | events: warnings only |
-| `j` `k` `g` `G` | scroll the describe overlay |
+| `j` `k` `g` `G` | scroll the describe view |
 
 `d` renders the object as YAML — every kind, CRDs included — with the noise
 `kubectl` also hides stripped out: managed fields, resource versions and the
-`last-applied-configuration` annotation. It is an overlay rather than a tab,
-and works straight from the list without opening the object first.
+`last-applied-configuration` annotation. It opens in the right pane, where
+the list or the open tab was, and works straight from the list without
+opening the object first.
 
 **Secret values are redacted**: a Secret shows its keys as
 `<redacted, N bytes>`, so you can check that a key exists and is not empty

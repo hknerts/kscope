@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::Frame;
 
@@ -21,12 +21,10 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focus()))
-        .title(format!(" describe · {subject}   (d or Esc to close) "));
+        .title(format!(" describe · {subject}   d or Esc to close "));
 
-    // An overlay rather than a tab: describe is a different question about the
-    // object you already have open, not a different view of it.
-    let area = super::centered_rect(84, 88, area);
-    f.render_widget(Clear, area);
+    // Drawn in the right-hand pane, where the list or the open tab was: the
+    // contexts, header and status stay in place around it.
     let inner = block.inner(area);
     f.render_widget(block, area);
     app.viewport_height = inner.height as usize;

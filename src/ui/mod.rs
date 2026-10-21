@@ -43,6 +43,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     contexts::draw(f, app, body[0]);
     match app.right {
+        // Describe takes the place of the list, in the same window.
+        RightMode::Browse if app.describe_open => describe::draw(f, app, body[1]),
         RightMode::Browse => resources::draw(f, app, body[1]),
         RightMode::Detail => draw_detail(f, app, body[1]),
     }
@@ -53,10 +55,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // prompt at the bottom of the screen.
     if app.mode == InputMode::Command {
         draw_completions(f, app, chunks[1]);
-    }
-
-    if app.describe_open {
-        describe::draw(f, app, area);
     }
 
     if app.mode == InputMode::Help {
@@ -118,6 +116,10 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
     spans.push(Span::styled("    Esc back", dim));
     f.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
 
+    if app.describe_open {
+        describe::draw(f, app, rows[1]);
+        return;
+    }
     match app.view {
         View::Logs => logs::draw(f, app, rows[1]),
         View::Metrics => metrics::draw(f, app, rows[1]),
@@ -873,5 +875,28 @@ mod render_tests {
             app.contexts[app.context_selected - app.fleets.len()].name,
             "stg-eu"
         );
+    }
+
+    #[tokio::test]
+    async fn describe_opens_in_the_right_pane_not_over_the_screen() {
+        let mut app = test_app(Config::default());
+        app.describe_open = true;
+        app.on_describe(Ok(serde_json::json!({
+            "kind": "Pod",
+            "metadata": { "name": "checkout-1" },
+        })));
+        let screen = render(&mut app, 160, 30);
+        let body = screen[6..28].join("\n");
+        // The contexts pane is still drawn beside it, every row of it.
+        assert!(body.contains("┌ contexts ─"), "{body}");
+        assert!(
+            body.contains("stg-us") && body.contains("prod-eu"),
+            "{body}"
+        );
+        // Describe starts where the list starts, right of the contexts.
+        let row = screen.iter().find(|r| r.contains(" describe · ")).unwrap();
+        let col = row[..row.find(" describe · ").unwrap()].chars().count();
+        assert_eq!(col, 29, "{row}");
+        assert!(body.contains("kind: Pod"), "{body}");
     }
 }
