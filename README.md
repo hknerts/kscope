@@ -304,19 +304,22 @@ An empty list (`prod = []`) or an empty variable switches a fleet off.
 `KSCOPE_FLEET` (with no suffix) is different: it is the same as `-u` and picks
 the fleet to start on.
 
-A fleet appears at the top of the contexts pane, marked `◇`, when at least one
-context matches it. kscope does not invent other groups from context names. A
+A fleet appears in the `fleets` box above the `contexts` box, marked `◇`, when
+at least one context matches it. One cursor runs over both boxes: `↑`/`↓`
+move from the last fleet straight onto the first context. kscope does not invent other groups from context names. A
 set that is not configured is still one `-u qa` or one `/` on the pane away.
 `Enter` on a fleet (or `kscope -u stg`) lists the current kind on **every
 member at once**, with a `context` column:
 
 ```
-┌─ contexts ─────┐┌─ pods /checkout/ · all · fleet stg ─────────────────────┐
+┌ fleets ────────┐┌ pods /checkout/ · all · fleet stg ──────────────────────┐
 │◇ prod ×2       ││context      namespace  name                   status    │
 │◆ stg ×5        ││stg-eu-1     shop       checkout-b9d96-nfps9   Running   │
-│  prod-eu-1     ││stg-eu-1     shop       checkout-canary        Running   │
-│· stg-eu-1      ││stg-us-2     shop       checkout-84757-ffk7f   Running   │
-│● stg-us-2      ││stg-us-2     shop       payments-broken        CrashLoop │
+└────────────────┘│stg-eu-1     shop       checkout-canary        Running   │
+┌ contexts ──────┐│stg-us-2     shop       checkout-84757-ffk7f   Running   │
+│  prod-eu-1     ││stg-us-2     shop       payments-broken        CrashLoop │
+│· stg-eu-1      ││                                                         │
+│● stg-us-2      ││                                                         │
 └────────────────┘└─────────────────────────────────────────────────────────┘
 ```
 

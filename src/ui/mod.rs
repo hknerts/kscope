@@ -426,7 +426,7 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
         (Pane::Contexts, _) => {
             bindings.push(("Enter", "switch to it"));
             bindings.push(("/", "fleet, e.g. stg"));
-            bindings.push(("j/k", "move"));
+            bindings.push(("↑/↓", "fleets and contexts"));
             bindings.push(("Tab", "back to the list"));
         }
         (Pane::Resources, RightMode::Browse) => {
@@ -839,6 +839,39 @@ mod render_tests {
         assert!(
             screen.contains("stg-us") && screen.contains("checkout-2"),
             "{screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fleets_sit_in_their_own_box_above_the_contexts() {
+        let mut config = Config::default();
+        config.fleets.insert("stg".into(), vec!["stg-*".into()]);
+        let mut app = test_app(config);
+        app.pane = crate::app::Pane::Contexts;
+        app.context_selected = 0;
+        let screen = render(&mut app, 160, 30);
+        let fleets = screen
+            .iter()
+            .position(|r| r.contains("┌ fleets ─"))
+            .unwrap();
+        let contexts = screen
+            .iter()
+            .position(|r| r.contains("┌ contexts ─"))
+            .unwrap();
+        let row = |text: &str| screen.iter().position(|r| r.contains(text)).unwrap();
+        assert!(fleets < row("◇ stg ×2"), "{}", screen.join("\n"));
+        assert!(row("◇ stg ×2") < contexts, "{}", screen.join("\n"));
+        assert!(contexts < row("stg-us") && contexts < row("prod-eu"));
+
+        // One cursor runs over both boxes: down from the last fleet lands
+        // on the first context, with no Tab in between.
+        app.on_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Down),
+        ));
+        assert_eq!(app.context_selected, 1);
+        assert_eq!(
+            app.contexts[app.context_selected - app.fleets.len()].name,
+            "stg-eu"
         );
     }
 }

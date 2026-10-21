@@ -165,12 +165,6 @@ struct PendingOpen {
     describe: bool,
 }
 
-/// One entry of the contexts pane: configured fleets first, then contexts.
-pub enum PaneEntry<'a> {
-    Fleet(&'a Fleet),
-    Context(&'a ContextEntry),
-}
-
 /// A kubeconfig context in the left-hand pane.
 #[derive(Debug, Clone)]
 pub struct ContextEntry {
@@ -617,14 +611,8 @@ impl App {
 
     // -------------------------------------------------------------- contexts
 
-    /// Fleets, then contexts: what the left-hand pane lists, in order.
-    pub fn pane_entries(&self) -> impl Iterator<Item = PaneEntry<'_>> {
-        self.fleets
-            .iter()
-            .map(PaneEntry::Fleet)
-            .chain(self.contexts.iter().map(PaneEntry::Context))
-    }
-
+    /// Entries in the left-hand pane: fleets, then contexts. One cursor
+    /// (`context_selected`) runs over both.
     pub fn pane_len(&self) -> usize {
         self.fleets.len() + self.contexts.len()
     }

@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Fleets have a box of their own.** The left pane shows a `fleets` box
+  above the `contexts` box instead of one mixed list. One cursor runs over
+  both: `↑`/`↓` (or `j`/`k`) move from the last fleet onto the first context
+  with no `Tab`. The box holding the cursor is the highlighted one.
+
 ## [1.6.0] - 2026-10-21
 
 ### Added
