@@ -261,7 +261,7 @@ Two fleets are built in, so most setups need no configuration at all:
 | Fleet | Matches contexts named like |
 | --- | --- |
 | `stg` | `*stg*`, `*staging*` |
-| `prod` | `*prod*`, `*prd*` |
+| `prod` | `*prod*`, `*prd*`, `*pro*` |
 
 Each source below overrides the one above it for the same fleet name, and
 fleets with other names are added alongside:

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// contexts pane when some context matches.
 pub const DEFAULT_FLEETS: &[(&str, &[&str])] = &[
     ("stg", &["*stg*", "*staging*"]),
-    ("prod", &["*prod*", "*prd*"]),
+    ("prod", &["*prod*", "*prd*", "*pro*"]),
 ];
 
 /// `KSCOPE_FLEET_STG="stg-eu-*,qa-eu"` defines (or overrides) fleet `stg`.
@@ -352,7 +352,7 @@ mod tests {
         let mut c = Config::default();
         c.merge_fleets(env(&[]));
         assert_eq!(c.fleets["stg"], vec!["*stg*", "*staging*"]);
-        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*"]);
+        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*", "*pro*"]);
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         let mut c: Config = toml::from_str("[fleets]\nstg = [\"kind-stg-*\"]\n").unwrap();
         c.merge_fleets(env(&[]));
         assert_eq!(c.fleets["stg"], vec!["kind-stg-*"]);
-        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*"]);
+        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*", "*pro*"]);
     }
 
     #[test]
