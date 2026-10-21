@@ -55,9 +55,9 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("  :pods        logs are only served for pods"),
+            Line::from("  Enter        on a pod streams it; on a deployment, statefulset,"),
+            Line::from("               daemonset, job or service merges all of its pods"),
             Line::from("  Esc          back to the list"),
-            Line::from("  Enter        open a pod to stream it"),
             Line::from("  ?            all key bindings"),
         ];
         f.render_widget(Paragraph::new(hint), inner);
@@ -76,6 +76,8 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let multi = app.attached.len() > 1;
+    // Across a fleet the gutter also names the cluster.
+    let gutter = if app.log_members.is_empty() { 14 } else { 28 };
     let start = app.scroll.min(app.buffer.view_len());
     let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
     let search = app.search.regex.as_ref();
@@ -98,11 +100,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         if multi {
-            let short = short_source(&entry.source);
+            let short = short_source(&entry.source, gutter);
             rendered.spans.insert(
                 0,
                 Span::styled(
-                    format!("{short:<14} "),
+                    format!("{short:<gutter$} "),
                     Style::default().fg(source_color(&entry.source, theme)),
                 ),
             );
@@ -157,16 +159,31 @@ fn clock(ts: &str) -> &str {
     }
 }
 
+/// Says what is merged: a workload's logs are every replica's, and within a
+/// fleet every cluster's, which is easy to miss without being told.
 fn title(app: &App) -> String {
     let follow = if app.follow { "follow" } else { "paused" };
     let wrap = if app.wrap { "wrap" } else { "nowrap" };
+    let (pods, clusters) = app.log_spread();
+    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     match app.attached.len() {
         0 => match app.selected_pod() {
             Some(pod) => format!(" logs · {} · {} · not attached ", pod.name, pod.phase),
             None => " logs ".to_string(),
         },
+        _ if !app.log_members.is_empty() => format!(
+            " logs · {} merged from {} of {} · {follow} · {wrap} ",
+            plural(pods, "pod"),
+            clusters,
+            plural(app.log_members.len(), "cluster"),
+        ),
         1 => format!(" logs · {} · {follow} · {wrap} ", app.attached[0]),
-        n => format!(" logs · {n} streams · {follow} · {wrap} "),
+        n if pods > 1 => format!(
+            " logs · {} merged · {} · {follow} · {wrap} ",
+            plural(pods, "pod"),
+            plural(n, "container")
+        ),
+        n => format!(" logs · {} · {follow} · {wrap} ", plural(n, "container")),
     }
 }
 
@@ -212,10 +229,17 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// `ns/pod:container` → `pod:container`, shortened for the gutter.
-fn short_source(source: &str) -> String {
-    let tail = source.split('/').next_back().unwrap_or(source);
-    super::truncate(tail, 14)
+/// `ns/pod:container` → `pod:container`, shortened for the gutter; within a
+/// fleet `context|ns/pod:container` → `context pod:container`.
+fn short_source(source: &str, width: usize) -> String {
+    let (context, local) = source.split_once('|').unwrap_or(("", source));
+    let tail = local.split('/').next_back().unwrap_or(local);
+    if context.is_empty() {
+        return super::truncate(tail, width);
+    }
+    let context = super::truncate(context, width / 2);
+    let rest = width.saturating_sub(context.chars().count() + 1);
+    format!("{context} {}", super::truncate(tail, rest))
 }
 
 /// Deterministic colour per stream so interleaved logs stay readable.
@@ -240,7 +264,11 @@ mod tests {
 
     #[test]
     fn shortens_source_labels() {
-        assert_eq!(short_source("prod/api-0:app"), "api-0:app");
+        assert_eq!(short_source("prod/api-0:app", 14), "api-0:app");
+        assert_eq!(
+            short_source("stg-eu|shop/api-0:app", 28),
+            "stg-eu api-0:app"
+        );
     }
 
     #[test]

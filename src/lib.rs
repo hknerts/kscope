@@ -12,6 +12,7 @@
 //! * [`app`] — state and key handling. [`ui`] — rendering.
 
 pub mod app;
+pub mod compare;
 pub mod config;
 pub mod describe;
 pub mod event;

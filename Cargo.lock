@@ -1224,6 +1224,7 @@ name = "kscope"
 version = "1.6.2"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "crossterm",

@@ -145,9 +145,20 @@ pub struct ResourceRow {
     /// The object's own pod selector, when it has one. Lets a Service (or a
     /// CRD shaped like one) resolve to the pods whose logs it fronts.
     pub selector: std::collections::BTreeMap<String, String>,
+    /// Container images, for the kinds that run containers: a pod's own,
+    /// a workload's pod template's, a CronJob's job template's.
+    pub images: Vec<String>,
+    /// Current CPU (millicores) and memory (bytes): the pod's own, or the
+    /// sum over the pods the object selects. `None` when metrics-server is
+    /// not installed or no running pod reports usage.
+    pub usage: Option<(f64, f64)>,
 }
 
 impl ResourceRow {
+    /// Pods, workloads and Services: kinds whose rows can carry usage.
+    pub fn runs_pods(&self) -> bool {
+        !self.images.is_empty() || !self.selector.is_empty()
+    }
     pub fn key(&self) -> String {
         if self.namespace.is_empty() {
             self.name.clone()
@@ -204,7 +215,65 @@ pub async fn list(
         }
     }
     rows.sort_by(|a, b| a.namespace.cmp(&b.namespace).then(a.name.cmp(&b.name)));
+
+    // Usage is decoration: a cluster without metrics-server, or one slow to
+    // answer, gets "-" in those columns rather than a slower list.
+    if rows.iter().any(ResourceRow::runs_pods) {
+        let usage =
+            tokio::time::timeout(USAGE_TIMEOUT, super::metrics::pod_usage(client, scope)).await;
+        if let Ok(Ok(samples)) = usage {
+            attach_usage(&mut rows, &kind.api.kind, &samples);
+        }
+    }
     Ok(rows)
+}
+
+/// How long the list waits for metrics-server before leaving usage out.
+const USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Give every row its usage: a Pod its own, anything with a pod selector
+/// the sum over the pods it selects in its namespace.
+pub fn attach_usage(rows: &mut [ResourceRow], kind: &str, samples: &[super::metrics::PodSample]) {
+    let by_name: std::collections::HashMap<(&str, &str), &super::metrics::PodSample> = samples
+        .iter()
+        .map(|s| ((s.namespace.as_str(), s.name.as_str()), s))
+        .collect();
+    for row in rows.iter_mut() {
+        let selected: Vec<&super::metrics::PodSample> = if kind == "Pod" {
+            by_name
+                .get(&(row.namespace.as_str(), row.name.as_str()))
+                .into_iter()
+                .copied()
+                .collect()
+        } else if row.selector.is_empty() {
+            continue;
+        } else {
+            samples
+                .iter()
+                .filter(|s| {
+                    s.namespace == row.namespace
+                        && row
+                            .selector
+                            .iter()
+                            .all(|(k, v)| s.labels.get(k).is_some_and(|got| got == v))
+                })
+                .collect()
+        };
+        if !selected.is_empty() {
+            row.usage = Some((
+                selected.iter().map(|s| s.cpu_milli()).sum(),
+                selected.iter().map(|s| s.mem_bytes()).sum(),
+            ));
+        }
+    }
+}
+
+/// `250m 128.0Mi`, or `-` for each when there is no usage.
+pub fn fmt_usage(usage: Option<(f64, f64)>) -> (String, String) {
+    match usage {
+        Some((cpu, mem)) => (crate::metrics::fmt_cpu(cpu), crate::metrics::fmt_bytes(mem)),
+        None => ("-".into(), "-".into()),
+    }
 }
 
 /// Fetch one object in full, for the describe tab.
@@ -243,6 +312,51 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
         status,
         unhealthy,
         selector: pod_selector(&obj.data),
+        images: container_images(&obj.data),
+        usage: None,
+    }
+}
+
+/// The images an object runs, in spec order, init containers left out.
+/// Containers live at a different depth per kind: a Pod's spec, a workload's
+/// pod template, a CronJob's job template.
+pub fn container_images(data: &serde_json::Value) -> Vec<String> {
+    let pod_specs = [
+        &data["spec"],
+        &data["spec"]["template"]["spec"],
+        &data["spec"]["jobTemplate"]["spec"]["template"]["spec"],
+    ];
+    pod_specs
+        .iter()
+        .flat_map(|spec| spec["containers"].as_array().into_iter().flatten())
+        .filter_map(|c| c["image"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// An image as name and version: `registry.k8s.io/coredns/coredns:v1.14.2`
+/// → `coredns:v1.14.2`. The registry and path are the same long prefix on
+/// every row and say little; the version is what differs. No tag means
+/// `latest`, and is shown as such. A digest is cut to 12 characters, enough
+/// to tell two apart.
+pub fn short_image(image: &str) -> String {
+    let (path, digest) = match image.split_once('@') {
+        Some((path, digest)) => (path, Some(digest)),
+        None => (image, None),
+    };
+    // The last path segment is the name; a `:` in it starts the tag (a `:`
+    // before it is a registry port).
+    let last = path.rsplit('/').next().unwrap_or(path);
+    let (name, tag) = match last.split_once(':') {
+        Some((name, tag)) => (name, Some(tag)),
+        None => (last, None),
+    };
+    match (tag, digest) {
+        (Some(tag), _) => format!("{name}:{tag}"),
+        (None, Some(digest)) => {
+            let hash = digest.strip_prefix("sha256:").unwrap_or(digest);
+            format!("{name}@{}", &hash[..hash.len().min(12)])
+        }
+        (None, None) => format!("{name}:latest"),
     }
 }
 
@@ -375,6 +489,110 @@ pub fn contexts() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_is_a_pods_own_or_the_sum_of_what_a_workload_selects() {
+        use super::super::metrics::{ContainerSample, PodSample};
+        let sample = |name: &str, app: &str, cpu: f64| PodSample {
+            namespace: "shop".into(),
+            name: name.into(),
+            labels: [("app".to_string(), app.to_string())].into(),
+            containers: vec![ContainerSample {
+                name: "c".into(),
+                cpu_milli: cpu,
+                mem_bytes: 1024.0,
+            }],
+        };
+        let samples = vec![
+            sample("api-1", "api", 10.0),
+            sample("api-2", "api", 5.0),
+            sample("db-0", "db", 1.0),
+        ];
+
+        let mut pods = vec![
+            ResourceRow {
+                namespace: "shop".into(),
+                name: "api-2".into(),
+                ..Default::default()
+            },
+            ResourceRow {
+                namespace: "shop".into(),
+                name: "gone".into(),
+                ..Default::default()
+            },
+        ];
+        attach_usage(&mut pods, "Pod", &samples);
+        assert_eq!(pods[0].usage, Some((5.0, 1024.0)));
+        assert_eq!(pods[1].usage, None);
+
+        let mut deploys = vec![
+            ResourceRow {
+                namespace: "shop".into(),
+                name: "api".into(),
+                selector: [("app".to_string(), "api".to_string())].into(),
+                ..Default::default()
+            },
+            // Same labels, other namespace: selects nothing.
+            ResourceRow {
+                namespace: "other".into(),
+                name: "api".into(),
+                selector: [("app".to_string(), "api".to_string())].into(),
+                ..Default::default()
+            },
+        ];
+        attach_usage(&mut deploys, "Deployment", &samples);
+        assert_eq!(deploys[0].usage, Some((15.0, 2048.0)));
+        assert_eq!(deploys[1].usage, None);
+        assert_eq!(
+            fmt_usage(deploys[1].usage),
+            ("-".to_string(), "-".to_string())
+        );
+        assert_eq!(
+            fmt_usage(deploys[0].usage),
+            ("15m".to_string(), "2.0Ki".to_string())
+        );
+    }
+
+    #[test]
+    fn images_show_name_and_version_only() {
+        assert_eq!(
+            short_image("registry.k8s.io/coredns/coredns:v1.14.2"),
+            "coredns:v1.14.2"
+        );
+        assert_eq!(short_image("ghcr.io/hknerts/kscope:1.6.2"), "kscope:1.6.2");
+        assert_eq!(
+            short_image("docker.io/library/busybox:1.36"),
+            "busybox:1.36"
+        );
+        assert_eq!(short_image("busybox:1.36"), "busybox:1.36");
+        // The version is always there: no tag is `latest`.
+        assert_eq!(short_image("busybox"), "busybox:latest");
+        // A registry port is not a tag.
+        assert_eq!(short_image("registry.local:5000/team/api"), "api:latest");
+        assert_eq!(short_image("registry.local:5000/team/api:2.1"), "api:2.1");
+        // A tag wins over a digest; a digest alone is shortened.
+        assert_eq!(
+            short_image("api:2.1@sha256:0123456789abcdef0123"),
+            "api:2.1"
+        );
+        assert_eq!(
+            short_image("123.dkr.ecr.eu-west-1.amazonaws.com/api@sha256:0123456789abcdef0123"),
+            "api@0123456789ab"
+        );
+    }
+
+    #[test]
+    fn rows_carry_the_images_of_any_kind_that_runs_containers() {
+        let pod = serde_json::json!({"spec": {
+            "initContainers": [{"image": "migrate:1"}],
+            "containers": [{"image": "api:2"}, {"image": "envoy:1.30"}]
+        }});
+        assert_eq!(container_images(&pod), vec!["api:2", "envoy:1.30"]);
+        let deploy = serde_json::json!({"spec": {"template": {"spec": {"containers": [{"image": "api:2"}]}}}});
+        assert_eq!(container_images(&deploy), vec!["api:2"]);
+        let svc = serde_json::json!({"spec": {"selector": {"app": "api"}}});
+        assert!(container_images(&svc).is_empty());
+    }
     use serde_json::json;
 
     fn kind(group: &str, plural: &str, kind: &str) -> ResourceType {

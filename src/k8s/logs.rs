@@ -37,14 +37,22 @@ pub struct StreamSpec {
     pub timestamps: bool,
     /// Read the logs of the previous, crashed instance.
     pub previous: bool,
+    /// The fleet member the pod lives on, when logs are merged across a
+    /// fleet. Part of the source label, so two clusters' `api-0` stay apart.
+    pub context: Option<String>,
 }
 
 impl StreamSpec {
-    /// Stable identifier used as the per-line source label.
+    /// Stable identifier used as the per-line source label:
+    /// `ns/pod:container`, prefixed `context|` within a fleet.
     pub fn source(&self) -> Arc<str> {
-        match &self.container {
-            Some(c) => Arc::from(format!("{}/{}:{}", self.namespace, self.pod, c)),
-            None => Arc::from(format!("{}/{}", self.namespace, self.pod)),
+        let local = match &self.container {
+            Some(c) => format!("{}/{}:{}", self.namespace, self.pod, c),
+            None => format!("{}/{}", self.namespace, self.pod),
+        };
+        match &self.context {
+            Some(context) => Arc::from(format!("{context}|{local}")),
+            None => Arc::from(local),
         }
     }
 }
@@ -316,8 +324,14 @@ mod tests {
             since_seconds: None,
             timestamps: false,
             previous: false,
+            context: None,
         };
         assert_eq!(&*spec.source(), "prod/api-0:app");
+        let fleet = StreamSpec {
+            context: Some("stg-eu".into()),
+            ..spec
+        };
+        assert_eq!(&*fleet.source(), "stg-eu|prod/api-0:app");
     }
 
     #[test]

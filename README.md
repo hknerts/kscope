@@ -85,9 +85,14 @@ one screen:
 * **Fleets** — an environment is rarely one cluster. `stg` and `prod` are
   built in, more come from the config or `KSCOPE_FLEET_<NAME>`, and every
   listing spans all members at once,
-  tagged with the cluster each row came from. Filter, triage and open as
-  usual: `Enter` on a row from another cluster switches there and opens it.
+  tagged with the cluster each row came from. `Enter` on a workload merges
+  its logs from **every cluster** it runs on, and `a` lines it up across
+  them with the drift flagged: which cluster runs another image, other
+  replicas, or a spec that differs, down to the field.
   See [Fleets: many clusters as one](#fleets-many-clusters-as-one).
+* **The list says what runs** — pods, workloads and Services show their live
+  CPU and memory (the sum over their pods; `-` without metrics-server) and
+  their images as `name:version`, without the registry prefix.
 
 ## kscope or k9s?
 
@@ -118,9 +123,10 @@ cluster of an environment, with a `context` column.
 | --- | --- | --- |
 | Clusters in one view | one context at a time | a whole fleet (`-u stg`) |
 | Search across clusters | switch with `:ctx` and search each one | `/checkout` filters every member at once |
-| Open a row from another cluster | switch context first | `Enter` switches there and opens it |
+| Logs of a workload on several clusters | one cluster at a time | `Enter` merges every cluster's replicas, each line labelled |
+| Drift between clusters | compare by hand | `a`: images, replicas and spec side by side, the odd one flagged |
 | Environment groups | none | `stg` and `prod` built in, more via `[fleets]` or `KSCOPE_FLEET_<NAME>` |
-| One-shot listing | none (it is TUI only) | `kscope get pods -u prod`, with a `CONTEXT` column |
+| One-shot listing | none (it is TUI only) | `kscope get pods -u prod`, with `CONTEXT`, `CPU`, `MEMORY` and `IMAGE` |
 | A cluster that is down | that context fails | reported in the header; the others still list |
 
 ## Install
@@ -199,9 +205,10 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 
 | Key | Action |
 | --- | --- |
-| `Enter`, `l` | open the object's logs |
+| `Enter`, `l` | open the object's logs (a workload: all its pods; a fleet: all its clusters) |
 | `m` / `e` | open its metrics / events |
 | `d` | describe it: a tab like `l` `m` `e`, which lead straight on from it |
+| `a` | in a fleet: the object on every cluster, drift flagged |
 | `/` | filter the list by name or namespace |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
@@ -237,6 +244,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `S` | cycle sort: name / cpu / memory |
 | `W` | events: warnings only |
 | `j` `k` `g` `G` | scroll the describe view |
+| `v` | describe of a Secret: show its values decoded, or hide them again |
 
 `d` renders the object as YAML — every kind, CRDs included — with the noise
 `kubectl` also hides stripped out: managed fields, resource versions and the
@@ -246,8 +254,12 @@ opening the object first.
 
 **Secret values are redacted**: a Secret shows its keys as
 `<redacted, N bytes>`, so you can check that a key exists and is not empty
-without reading it — even when kscope runs with a token that could. Set
-`describe.show_secret_values = true` to opt out.
+without reading it — even when kscope runs with a token that could. `v` shows
+the values **decoded** (`password: hunter2`, not base64) and hides them again;
+moving to another object hides them too. Binary values are named
+(`<binary, 2048 bytes>`), not printed. To hand kscope to people who must never
+see them, set `describe.allow_reveal = false`; to always show them,
+`describe.show_secret_values = true`.
 
 > The logs tab resolves whatever you opened down to pods: a Deployment,
 > StatefulSet, DaemonSet, Job or ReplicaSet through its replicas, a Service or
@@ -326,10 +338,28 @@ member at once**, with a `context` column:
 
 * **Search**: `/` filters by name, namespace *or* context across every member;
   `:deploy`, `!` and `L` work exactly as on one cluster.
-* **Open**: `Enter`, `l`, `m`, `e` or `d` on a row from another cluster
-  switches kscope to that cluster and opens the object there — logs,
-  metrics, events and describe always come from the cluster the row lives
-  on. `Esc` brings you back to the fleet-wide list, still filtered.
+* **Logs from every cluster**: `Enter` (or `l`) on a workload streams its
+  pods on **every member that has it**, merged into one timeline. Each line
+  starts with its cluster, and the title says how much is merged
+  (`logs · 4 pods merged from 2 of 2 clusters`). A rollout on any member
+  hands over to the new pods within 15 seconds. No context switch happens.
+* **Compare (`a`)**: the object as each member has it, side by side:
+  status, replicas, images, and whether the spec is the same. Whatever
+  differs from most members is flagged, down to the field:
+
+  ```
+   ≠ replicas differ on stg-us   spec differs on stg-us (template.spec.containers[0].image)
+  CLUSTER   STATUS  REPLICAS  SPEC     IMAGES
+  stg-eu    2/2     2         same     checkout:2.4.1
+  stg-us    3/3     3         differs  checkout:2.3.0
+  stg-ap    —                          not on this cluster
+  ```
+
+  ConfigMaps and Secrets compare their data (only whether it differs is
+  shown, never a value). A `rollout restart` is not counted as drift.
+* **Open elsewhere**: `m`, `e` or `d` on a row from another cluster switch
+  kscope to that cluster and open the object there. `Esc` brings you back
+  to the fleet-wide list, still filtered.
 * **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
   and globs as `-u`.
 * **Leave**: pick a single context in the pane.
@@ -345,13 +375,20 @@ exits, like `kubectl get` with a `CONTEXT` column. `NAME` is a substring of the
 name or namespace. `-n` and `-l` narrow the search the same way as in kubectl:
 
 ```console
-$ kscope get deploy checkout -u stg
-CONTEXT   NAMESPACE  NAME      STATUS  AGE
-stg-eu-1  shop       checkout  2/2     8m
-stg-us-2  shop       checkout  2/2     8m
+$ kscope get deploy -u stg -n shop
+CONTEXT      NAMESPACE  NAME      STATUS  CPU  MEMORY   AGE   IMAGE
+kind-stg-eu  shop       cart      2/2     2m   656.0Ki  2d2h  busybox:1.36
+kind-stg-eu  shop       checkout  2/2     2m   1.2Mi    2d2h  busybox:1.36
+kind-stg-us  shop       cart      2/2     2m   648.0Ki  2d2h  busybox:1.36
+kind-stg-us  shop       checkout  2/2     2m   680.0Ki  2d2h  busybox:1.36
 
 $ kscope get sts -u prod -n data
 ```
+
+`CPU` and `MEMORY` are current usage from metrics-server: a pod's own, a
+workload's or Service's summed over its pods, `-` when a cluster has no
+metrics-server or a pod is not running. `IMAGE` is `name:version` without the
+registry. Kinds that run no pods (ConfigMaps, say) get neither column.
 
 `get` exits 0 even when nothing matches, as kubectl does. For grep-style exit
 codes use `--find TEXT -k KIND`, which exits 1 when nothing matches.
@@ -415,6 +452,7 @@ max_fps = 30
 
 [describe]
 show_secret_values = false   # Secrets render as <redacted, N bytes>
+allow_reveal = true          # v shows a Secret's values decoded; false forbids it
 
 [fleets]                     # contexts browsed as one, by glob; stg and prod
 qa = ["qa-*"]                # are built in, KSCOPE_FLEET_<NAME> overrides

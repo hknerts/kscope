@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Logs from every cluster of a fleet.** `Enter` (or `l`) on a workload in
+  a fleet streams its pods on every member that has it, merged into one
+  timeline with the cluster at the start of each line. No context switch.
+  Rollouts on any member are followed within 15 seconds.
+- **Compare across a fleet (`a`).** The open object as each member has it:
+  status, replicas, images, and whether the spec matches. Whatever differs
+  from most members is flagged, down to the field
+  (`spec differs on stg-us (template.spec.containers[0].image)`). Members
+  without the object, or unreachable, are said to be.
+- **Live CPU and memory in the list.** Pods show their own usage;
+  Deployments, StatefulSets, DaemonSets, Jobs and Services the sum over the
+  pods they select. `-` without metrics-server. `kscope get` prints `CPU` and
+  `MEMORY` columns too.
+- **Images in the list**, as `name:version` without the registry
+  (`registry.k8s.io/coredns/coredns:v1.14.2` → `coredns:v1.14.2`), in the
+  TUI and in `kscope get`.
+- **`v` reveals a Secret's values, decoded**, in describe, and hides them
+  again. Binary values are named, not printed. `describe.allow_reveal = false`
+  turns it off for a team.
+
+### Changed
+
+- The logs title says what is merged: `3 pods merged`, or across a fleet
+  `4 pods merged from 2 of 2 clusters`. The empty logs pane explains that a
+  workload or Service merges all of its pods.
+
 ## [1.6.2] - 2026-10-21
 
 ### Fixed

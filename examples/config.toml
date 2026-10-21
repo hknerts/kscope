@@ -16,6 +16,9 @@ mouse = true
 [describe]
 # Secret values are shown as "<redacted, N bytes>". Set to true to see them.
 show_secret_values = false
+# `v` on a Secret's describe shows its values decoded. Set to false to hand
+# kscope to people who must never see them, even on demand.
+allow_reveal = true
 
 [fleets]
 # Named sets of kubeconfig contexts, listed as one (globs: * and ?). They show

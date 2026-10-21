@@ -139,12 +139,30 @@ members concurrently under a per-member timeout. Rows carry the context they
 came from (`ResourceRow::context`), so selection, filtering and stale-answer
 detection work on `identity()` = `context:namespace/name`.
 
-Everything else (inventory, metrics, events, log streams, describe) stays
-bound to the one connected context. Opening a row from another member does not
-fetch across clusters. It records a pending open, asks the main loop for an
+Three things read every member directly, through the cached clients:
+
+* **Logs.** `App::sync_logs` streams the connected member's pods from its
+  watched inventory at once, and asks the main loop (`FleetPodsRequest`) for
+  the other members' pods in the object's namespace. `fleet::pods` lists them
+  (plus ReplicaSet metadata, to resolve Deployments) and the same
+  `selection::pods_for` rules pick the replicas there. Each `StreamSpec`
+  carries its `context`, which picks the client and prefixes the source label
+  (`context|ns/pod:container`). The request repeats on the fleet refresh
+  interval so rollouts are followed.
+* **Compare.** `fleet::get` fetches the object from every member; the pure
+  `compare` module reduces each to images, replicas and a fingerprint of the
+  spec (or of the data, for ConfigMaps and Secrets), votes on the common
+  value, and names the fields where the odd members differ.
+* **List usage.** `resources::list` adds a metrics.k8s.io LIST (bounded to 3
+  seconds) for kinds that run pods; pods match by name, anything with a
+  selector sums the pods whose labels it selects. This works per member, so a
+  fleet listing gets usage from every cluster.
+
+Everything else (inventory, metrics, events, describe) stays bound to the one
+connected context. Opening a row from another member for those does not fetch
+across clusters. It records a pending open, asks the main loop for an
 ordinary context switch, and `adopt_context` finishes the open once the new
-client is in place, keeping the fleet's list intact. A row that is not on the
-connected context never has logs or describe fetched for it.
+client is in place, keeping the fleet's list intact.
 
 ## Failure behaviour
 

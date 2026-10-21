@@ -13,8 +13,15 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
     (
         "the list",
         &[
-            ("Enter  l", "open the selected object's logs"),
+            (
+                "Enter  l",
+                "logs; a workload merges all its pods, a fleet all clusters",
+            ),
             ("m  e  d", "its metrics, events, or YAML (describe)"),
+            (
+                "a",
+                "in a fleet: the object on every cluster, drift flagged",
+            ),
             ("/", "filter by name, namespace or cluster"),
             (
                 "!",
@@ -43,6 +50,7 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             ("t  p", "timestamps, previous (crashed) container"),
             ("s  c", "save what is shown to a file, clear"),
             ("v", "on a node: kubelet, containerd or kernel log"),
+            ("v", "in describe of a Secret: show values decoded, or hide"),
         ],
     ),
     (

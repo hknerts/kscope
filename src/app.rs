@@ -37,6 +37,8 @@ pub enum View {
     Logs,
     Metrics,
     Events,
+    /// The object on every member of the fleet, side by side.
+    Compare,
 }
 
 /// Which pane has the keyboard.
@@ -165,6 +167,16 @@ struct PendingOpen {
     describe: bool,
 }
 
+/// Pods wanted from the other members of a fleet, for logs merged across
+/// it. Taken by the main loop, answered through [`App::on_fleet_pods`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetPodsRequest {
+    /// The log key the answer belongs to; a later key makes it stale.
+    pub key: String,
+    pub members: Vec<String>,
+    pub namespace: String,
+}
+
 /// A kubeconfig context in the left-hand pane.
 #[derive(Debug, Clone)]
 pub struct ContextEntry {
@@ -273,9 +285,22 @@ pub struct App {
     volume_usage_pending: bool,
 
     // ------------------------------------------------------------- describe
-    /// Describe is an overlay rather than a tab: it is a different question
-    /// about the same object, not a different view of it.
+    /// The describe tab is showing. It sits beside logs, metrics and events,
+    /// so picking any of those leaves it.
     pub describe_open: bool,
+    /// The compare tab: the open object as each fleet member has it.
+    pub compare: Vec<crate::compare::Member>,
+    /// Which object (and fleet) `compare` belongs to.
+    compare_for: Option<String>,
+    /// Set when the compare tab needs fetching; taken by the main loop.
+    compare_wanted: bool,
+    /// A fetch is in flight.
+    pub compare_loading: bool,
+    /// The fetched object, kept so `v` can re-render it with or without
+    /// Secret values without asking the API server again.
+    describe_object: Option<serde_json::Value>,
+    /// `v` revealed this Secret's values. Reset for every new object.
+    pub secrets_revealed: bool,
     /// Rendered YAML of the open object, and which object it belongs to.
     pub describe_text: String,
     /// Byte range of every line in `describe_text`, computed once per fetch.
@@ -297,7 +322,14 @@ pub struct App {
     /// Key of the object the current streams belong to, so switching rows
     /// tears the old pod's streams down instead of merging two pods' logs.
     attached_to: Option<String>,
-    streams: HashMap<Arc<str>, tokio::task::JoinHandle<()>>,
+    /// Every open stream with the spec it was opened from, so a toggle
+    /// (timestamps, previous) can reopen exactly the same set.
+    streams: HashMap<Arc<str>, (StreamSpec, tokio::task::JoinHandle<()>)>,
+    /// While logs span a fleet: the members the open object lives on.
+    pub log_members: Vec<String>,
+    /// Pods (and a client) per other member, for fleet-wide logs.
+    fleet_pods: HashMap<String, (kube::Client, Vec<PodInfo>)>,
+    fleet_pods_request: Option<FleetPodsRequest>,
     log_tx: Sender<LogEvent>,
 
     pub status: Status,
@@ -390,6 +422,12 @@ impl App {
             volume_usage_pending: false,
             describe_open: false,
             describe_text: String::new(),
+            describe_object: None,
+            compare: Vec::new(),
+            compare_for: None,
+            compare_wanted: false,
+            compare_loading: false,
+            secrets_revealed: false,
             describe_lines: Vec::new(),
             describe_scroll: 0,
             describe_error: None,
@@ -401,6 +439,9 @@ impl App {
             attached: Vec::new(),
             attached_to: None,
             streams: HashMap::new(),
+            log_members: Vec::new(),
+            fleet_pods: HashMap::new(),
+            fleet_pods_request: None,
             log_tx,
             status: Status::default(),
             dirty: true,
@@ -548,6 +589,14 @@ impl App {
         let Some(context) = self.remote_context().map(str::to_string) else {
             return false;
         };
+        // Logs are merged from every member in place, and compare reads
+        // every member anyway: neither needs a switch.
+        if !describe
+            && (view == Some(View::Compare)
+                || (view == Some(View::Logs) && self.fleet_log_target().is_some()))
+        {
+            return false;
+        }
         let Some(row) = self.selected_row() else {
             return false;
         };
@@ -730,6 +779,8 @@ impl App {
         // may well have too: never show the old cluster's copy.
         self.describe_open = false;
         self.describe_for = None;
+        self.describe_object = None;
+        self.secrets_revealed = false;
         self.describe_text.clear();
         self.describe_lines.clear();
         self.describe_error = None;
@@ -1033,6 +1084,7 @@ impl App {
                 row.key()
             ));
             self.describe_for = None;
+            self.describe_object = None;
             self.describe_text.clear();
             self.describe_lines.clear();
             self.describe_loading = false;
@@ -1043,6 +1095,8 @@ impl App {
             return;
         }
         self.describe_for = Some(key);
+        self.describe_object = None;
+        self.secrets_revealed = false;
         self.describe_text.clear();
         self.describe_lines.clear();
         self.describe_error = None;
@@ -1068,9 +1122,8 @@ impl App {
     pub fn on_describe(&mut self, result: Result<serde_json::Value, String>) {
         match result {
             Ok(object) => {
-                self.describe_text =
-                    crate::describe::render(&object, self.config.describe.show_secret_values);
-                self.describe_lines = line_spans(&self.describe_text);
+                self.describe_object = Some(object);
+                self.render_describe();
                 self.describe_error = None;
             }
             Err(err) => {
@@ -1080,6 +1133,52 @@ impl App {
             }
         }
         self.describe_scroll = 0;
+        self.dirty = true;
+    }
+
+    fn render_describe(&mut self) {
+        let Some(object) = &self.describe_object else {
+            return;
+        };
+        let reveal = self.config.describe.show_secret_values || self.secrets_revealed;
+        self.describe_text = crate::describe::render(object, reveal);
+        self.describe_lines = line_spans(&self.describe_text);
+    }
+
+    /// `v` on a Secret's describe: show its values decoded, or hide them again.
+    fn toggle_secret_values(&mut self) {
+        let is_secret = self
+            .describe_object
+            .as_ref()
+            .is_some_and(crate::describe::has_secret_values);
+        if !is_secret {
+            self.set_status("v reveals values on a Secret only", StatusKind::Info);
+            return;
+        }
+        if self.config.describe.show_secret_values {
+            self.set_status(
+                "secret values are always shown (describe.show_secret_values)",
+                StatusKind::Info,
+            );
+            return;
+        }
+        if !self.config.describe.allow_reveal {
+            self.set_status(
+                "revealing secret values is turned off (describe.allow_reveal)",
+                StatusKind::Warn,
+            );
+            return;
+        }
+        self.secrets_revealed = !self.secrets_revealed;
+        self.render_describe();
+        self.set_status(
+            if self.secrets_revealed {
+                "showing secret values, decoded — v to hide"
+            } else {
+                "secret values hidden — v to show"
+            },
+            StatusKind::Info,
+        );
         self.dirty = true;
     }
 
@@ -1188,7 +1287,13 @@ impl App {
         if self.right != RightMode::Detail || self.view != View::Logs {
             return;
         }
-        let Some(target) = self.log_target() else {
+        // Within a fleet a workload's logs span every member it runs on.
+        let fleet = self.fleet_log_target();
+        let Some(target) = fleet
+            .as_ref()
+            .map(|(target, _)| target.clone())
+            .or_else(|| self.log_target())
+        else {
             return;
         };
 
@@ -1198,7 +1303,10 @@ impl App {
             return;
         }
 
-        let key = format!("{}/{}/{}", target.kind, target.namespace, target.name);
+        let mut key = format!("{}/{}/{}", target.kind, target.namespace, target.name);
+        if let (Some(_), Some(f)) = (&fleet, &self.fleet) {
+            key = format!("fleet:{}|{key}", f.name);
+        }
 
         // A different object means a different buffer.
         if self.attached_to.as_deref() != Some(key.as_str()) {
@@ -1206,21 +1314,68 @@ impl App {
             self.buffer.clear();
             self.scroll = 0;
             self.search.current = None;
-            self.attached_to = Some(key);
+            self.attached_to = Some(key.clone());
+            self.fleet_pods.clear();
+            self.log_members = fleet.as_ref().map(|(_, m)| m.clone()).unwrap_or_default();
+            let others: Vec<String> = self
+                .log_members
+                .iter()
+                .filter(|m| **m != self.context_name)
+                .cloned()
+                .collect();
+            if !others.is_empty() {
+                self.fleet_pods_request = Some(FleetPodsRequest {
+                    key: key.clone(),
+                    members: others,
+                    namespace: pods_namespace(&target),
+                });
+            }
         }
 
+        let template = StreamSpec {
+            namespace: String::new(),
+            pod: String::new(),
+            container: None,
+            tail: self.tail_lines(),
+            since_seconds: self.config.logs.since_seconds,
+            timestamps: self.timestamps,
+            previous: self.previous,
+            context: None,
+        };
+        let specs_for = |pods: Vec<&PodInfo>, context: Option<&str>| -> Vec<StreamSpec> {
+            pods.into_iter()
+                .flat_map(|pod| {
+                    pod.containers
+                        .iter()
+                        .filter(|c| !c.init)
+                        .map(|container| StreamSpec {
+                            namespace: pod.namespace.clone(),
+                            pod: pod.name.clone(),
+                            container: Some(container.name.clone()),
+                            context: context.map(str::to_string),
+                            ..template.clone()
+                        })
+                })
+                .collect()
+        };
+        let pods_for = crate::k8s::selection::pods_for;
         let mut wanted: Vec<StreamSpec> = Vec::new();
-        for pod in crate::k8s::selection::pods_for(&target, &self.inventory.pods, &self.selector) {
-            for container in pod.containers.iter().filter(|c| !c.init) {
-                wanted.push(StreamSpec {
-                    namespace: pod.namespace.clone(),
-                    pod: pod.name.clone(),
-                    container: Some(container.name.clone()),
-                    tail: self.tail_lines(),
-                    since_seconds: self.config.logs.since_seconds,
-                    timestamps: self.timestamps,
-                    previous: self.previous,
-                });
+        if fleet.is_none() {
+            let pods = pods_for(&target, &self.inventory.pods, &self.selector);
+            wanted = specs_for(pods, None);
+        } else {
+            for member in &self.log_members {
+                let pods = if *member == self.context_name {
+                    &self.inventory.pods
+                } else if let Some((_, pods)) = self.fleet_pods.get(member) {
+                    pods
+                } else {
+                    continue;
+                };
+                wanted.extend(specs_for(
+                    pods_for(&target, pods, &self.selector),
+                    Some(member),
+                ));
             }
         }
 
@@ -1245,7 +1400,7 @@ impl App {
             .collect();
         let dropped = stale.len();
         for source in stale {
-            if let Some(handle) = self.streams.remove(&source) {
+            if let Some((_, handle)) = self.streams.remove(&source) {
                 handle.abort();
             }
             self.attached.retain(|s| *s != source);
@@ -1254,20 +1409,27 @@ impl App {
         let had = self.attached.len();
         let mut opened = 0usize;
         for spec in wanted {
-            let source = spec.source();
-            if self.streams.contains_key(&source) {
+            if self.streams.contains_key(&spec.source()) {
                 continue;
             }
-            let handle = crate::k8s::logs::spawn(self.client.clone(), spec, self.log_tx.clone());
-            self.streams.insert(source.clone(), handle);
-            self.attached.push(source);
-            opened += 1;
+            if self.open_stream(spec) {
+                opened += 1;
+            }
         }
 
         if truncated {
             self.set_status(
                 format!("streaming {cap} of {total} containers — raise logs.max_streams for more"),
                 StatusKind::Warn,
+            );
+        } else if fleet.is_some() && (opened > 0 || dropped > 0) {
+            let (pods, clusters) = self.log_spread();
+            self.set_status(
+                format!(
+                    "merging {pods} pods from {clusters} of {} clusters",
+                    self.log_members.len()
+                ),
+                StatusKind::Info,
             );
         } else if had > 0 && (opened > 0 || dropped > 0) {
             // Only worth saying when this was a hand-over rather than the
@@ -1276,11 +1438,16 @@ impl App {
                 format!("membership changed: +{opened} -{dropped} containers"),
                 StatusKind::Info,
             );
+        } else if self.attached.is_empty() && self.fleet_pods_request.is_some() {
+            self.set_status(
+                "asking the other clusters for their pods…",
+                StatusKind::Info,
+            );
         } else if self.attached.is_empty() && !self.inventory_ready {
             // Right after connecting the pod list is still on its way; the
             // inventory update re-runs this and attaches.
             self.set_status("waiting for the pod inventory…", StatusKind::Info);
-        } else if self.attached.is_empty() {
+        } else if self.attached.is_empty() && fleet.is_none() {
             let hint = match self.current_type() {
                 Some(t) if !self.selector.is_empty() => {
                     format!("no {} pods match the selector", t.name())
@@ -1293,6 +1460,121 @@ impl App {
         self.dirty = true;
     }
 
+    /// The object to stream across the fleet, and the members it lives on:
+    /// every row of the listing with the same namespace and name. `None`
+    /// outside a fleet, and for Nodes, which have a journal instead.
+    fn fleet_log_target(&self) -> Option<(LogTarget, Vec<String>)> {
+        self.fleet.as_ref()?;
+        let kind = self.current_type()?.api.kind.clone();
+        if kind.eq_ignore_ascii_case("node") {
+            return None;
+        }
+        let row = self.selected_row()?;
+        let mut members: Vec<String> = Vec::new();
+        for other in &self.rows {
+            if other.namespace == row.namespace
+                && other.name == row.name
+                && !members.contains(&other.context)
+            {
+                members.push(other.context.clone());
+            }
+        }
+        let target = LogTarget {
+            kind,
+            namespace: row.namespace.clone(),
+            name: row.name.clone(),
+            selector: row.selector.clone(),
+        };
+        Some((target, members))
+    }
+
+    /// Distinct pods and clusters behind the open streams.
+    pub fn log_spread(&self) -> (usize, usize) {
+        let mut pods: HashSet<&str> = HashSet::new();
+        let mut clusters: HashSet<&str> = HashSet::new();
+        for source in &self.attached {
+            // `context|ns/pod:container`: the pod is everything before the
+            // container, the cluster everything before the `|`.
+            pods.insert(source.rsplit_once(':').map_or(&**source, |(pod, _)| pod));
+            clusters.insert(source.split_once('|').map_or("", |(context, _)| context));
+        }
+        (pods.len(), clusters.len())
+    }
+
+    /// Spawn one stream, on the cluster its spec names. False when that
+    /// member's client is not known yet.
+    fn open_stream(&mut self, spec: StreamSpec) -> bool {
+        let client = match &spec.context {
+            Some(context) if *context != self.context_name => match self.fleet_pods.get(context) {
+                Some((client, _)) => client.clone(),
+                None => return false,
+            },
+            _ => self.client.clone(),
+        };
+        let source = spec.source();
+        let handle = crate::k8s::logs::spawn(client, spec.clone(), self.log_tx.clone());
+        self.streams.insert(source.clone(), (spec, handle));
+        self.attached.push(source);
+        true
+    }
+
+    /// The pending request for the other members' pods, for the main loop.
+    pub fn take_fleet_pods_request(&mut self) -> Option<FleetPodsRequest> {
+        self.fleet_pods_request.take()
+    }
+
+    /// Ask again for the other members' pods, so a rollout there hands the
+    /// stream over to the new pods. Called on the fleet refresh interval.
+    pub fn refresh_fleet_pods(&mut self) {
+        if self.right != RightMode::Detail || self.view != View::Logs {
+            return;
+        }
+        let Some((target, members)) = self.fleet_log_target() else {
+            return;
+        };
+        let Some(key) = self.attached_to.clone() else {
+            return;
+        };
+        let others: Vec<String> = members
+            .into_iter()
+            .filter(|m| *m != self.context_name)
+            .collect();
+        if !others.is_empty() {
+            self.fleet_pods_request = Some(FleetPodsRequest {
+                key,
+                members: others,
+                namespace: pods_namespace(&target),
+            });
+        }
+    }
+
+    /// The other members' pods arrived. An answer for logs that are no
+    /// longer open is dropped.
+    pub fn on_fleet_pods(&mut self, key: String, answers: crate::k8s::fleet::MemberPods) {
+        if self.attached_to.as_deref() != Some(key.as_str()) {
+            return;
+        }
+        let mut failed: Vec<String> = Vec::new();
+        for (context, answer) in answers {
+            match answer {
+                Ok(found) => {
+                    self.fleet_pods.insert(context, found);
+                }
+                Err(err) => {
+                    tracing::warn!("pods on {context}: {err}");
+                    failed.push(context);
+                }
+            }
+        }
+        self.sync_logs();
+        if !failed.is_empty() {
+            self.set_status(
+                format!("no logs from {}: not reachable", failed.join(", ")),
+                StatusKind::Warn,
+            );
+        }
+    }
+
     /// `None` asks for the container's entire retained history.
     fn tail_lines(&self) -> Option<i64> {
         if self.config.logs.tail_lines <= 0 {
@@ -1303,38 +1585,37 @@ impl App {
     }
 
     pub fn detach_all(&mut self) {
-        for (_, handle) in self.streams.drain() {
+        for (_, (_, handle)) in self.streams.drain() {
             handle.abort();
         }
         self.attached.clear();
         self.attached_to = None;
     }
 
-    /// Re-attach every current stream, e.g. after toggling timestamps.
+    /// Reopen every current stream with the current toggles (timestamps,
+    /// previous), on the cluster each one came from.
     fn restream(&mut self) {
-        let sources: Vec<Arc<str>> = self.attached.clone();
-        self.detach_all();
-        for source in sources {
-            let (ns_pod, container) = match source.split_once(':') {
-                Some((a, b)) => (a.to_string(), Some(b.to_string())),
-                None => (source.to_string(), None),
-            };
-            let Some((namespace, pod)) = ns_pod.split_once('/') else {
-                continue;
-            };
-            let spec = StreamSpec {
-                namespace: namespace.to_string(),
-                pod: pod.to_string(),
-                container,
-                tail: self.tail_lines(),
-                since_seconds: self.config.logs.since_seconds,
-                timestamps: self.timestamps,
-                previous: self.previous,
-            };
-            let src = spec.source();
-            let handle = crate::k8s::logs::spawn(self.client.clone(), spec, self.log_tx.clone());
-            self.streams.insert(src.clone(), handle);
-            self.attached.push(src);
+        let mut specs: Vec<StreamSpec> = self
+            .attached
+            .iter()
+            .filter_map(|source| self.streams.get(source).map(|(spec, _)| spec.clone()))
+            .collect();
+        for (_, (_, handle)) in self.streams.drain() {
+            handle.abort();
+        }
+        self.attached.clear();
+        // The new streams replay the history with the new settings.
+        self.buffer.clear();
+        self.scroll = 0;
+        self.search.current = None;
+        for spec in &mut specs {
+            spec.tail = self.tail_lines();
+            spec.since_seconds = self.config.logs.since_seconds;
+            spec.timestamps = self.timestamps;
+            spec.previous = self.previous;
+        }
+        for spec in specs {
+            self.open_stream(spec);
         }
     }
 
@@ -1595,6 +1876,15 @@ impl App {
             // `e` is events, like `l` logs and `m` metrics; `E` still works
             // for anyone used to the old binding.
             KeyCode::Char('e') | KeyCode::Char('E') => self.set_view(View::Events),
+            KeyCode::Char('a') if self.fleet.is_none() => self.set_status(
+                "a compares an object across a fleet: start with -u stg, or / on the clusters pane",
+                StatusKind::Info,
+            ),
+            KeyCode::Char('a') => {
+                // Pressing it again re-reads every member.
+                self.compare_for = None;
+                self.set_view(View::Compare);
+            }
             KeyCode::Char('d') => self.toggle_describe(),
 
             // navigation
@@ -1715,6 +2005,8 @@ impl App {
                     StatusKind::Info,
                 );
             }
+
+            KeyCode::Char('v') if self.describe_open => self.toggle_secret_values(),
 
             // Cycle kubelet / containerd / kernel on a Node's log tab.
             KeyCode::Char('v')
@@ -1933,6 +2225,94 @@ impl App {
         // attach, not just the Browse → Detail transition.
         self.sync_logs();
         self.sync_describe();
+        self.sync_compare();
+        self.dirty = true;
+    }
+
+    /// Fetch the open object from every fleet member, unless that is what
+    /// the compare tab already shows.
+    fn sync_compare(&mut self) {
+        if self.right != RightMode::Detail || self.view != View::Compare || self.describe_open {
+            return;
+        }
+        let (Some(fleet), Some(kind), Some(row)) =
+            (&self.fleet, self.current_type(), self.selected_row())
+        else {
+            return;
+        };
+        let key = format!(
+            "{}|{}|{}/{}",
+            fleet.name,
+            kind.qualified(),
+            row.namespace,
+            row.name
+        );
+        if self.compare_for.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.compare_for = Some(key);
+        self.compare.clear();
+        self.compare_wanted = true;
+        self.compare_loading = true;
+        self.dirty = true;
+    }
+
+    /// The pending compare fetch: its key, the kind, namespace, name and the
+    /// members to ask.
+    pub fn take_compare_request(
+        &mut self,
+    ) -> Option<(String, ResourceType, String, String, Vec<String>)> {
+        if !std::mem::take(&mut self.compare_wanted) {
+            return None;
+        }
+        let key = self.compare_for.clone()?;
+        let members = self.fleet.as_ref()?.members.clone();
+        let kind = self.current_type()?.clone();
+        let row = self.selected_row()?;
+        Some((key, kind, row.namespace.clone(), row.name.clone(), members))
+    }
+
+    pub fn on_compare(
+        &mut self,
+        key: String,
+        answers: Vec<(String, Result<serde_json::Value, String>)>,
+    ) {
+        if self.compare_for.as_deref() != Some(key.as_str()) {
+            return;
+        }
+        self.compare = answers
+            .into_iter()
+            .map(|(context, answer)| crate::compare::Member::new(context, answer))
+            .collect();
+        self.compare_loading = false;
+        let drift = crate::compare::drift(&self.compare);
+        self.set_status(
+            if drift.is_empty() {
+                crate::compare::agreement(&self.compare)
+            } else {
+                let mut differ: Vec<&String> = drift
+                    .images
+                    .iter()
+                    .chain(&drift.replicas)
+                    .chain(&drift.spec)
+                    .collect();
+                differ.sort();
+                differ.dedup();
+                format!(
+                    "differs on {}",
+                    differ
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+            if drift.is_empty() {
+                StatusKind::Info
+            } else {
+                StatusKind::Warn
+            },
+        );
         self.dirty = true;
     }
 
@@ -2022,6 +2402,7 @@ impl App {
             }
             (Pane::Resources, RightMode::Detail) => match self.view {
                 View::Logs => self.scroll_by(delta),
+                View::Compare => {}
                 View::Events => {
                     let len = self.event_view.len();
                     if len > 0 {
@@ -2153,6 +2534,15 @@ fn line_spans(text: &str) -> Vec<std::ops::Range<usize>> {
         spans.push(start..text.len());
     }
     spans
+}
+
+/// The namespace whose pods a log target draws from.
+fn pods_namespace(target: &LogTarget) -> String {
+    if target.kind.eq_ignore_ascii_case("namespace") {
+        target.name.clone()
+    } else {
+        target.namespace.clone()
+    }
 }
 
 #[cfg(test)]
@@ -2328,9 +2718,9 @@ pub(crate) mod tests {
         app.rebuild_row_view();
         assert_eq!(app.row_view.len(), 1);
 
-        // Enter on the stg-us row: nothing is fetched from the wrong cluster,
-        // a switch is requested instead.
-        app.activate_selection();
+        // Metrics of the stg-us row: nothing is fetched from the wrong
+        // cluster, a switch is requested instead.
+        app.set_view(View::Metrics);
         assert_eq!(app.pending_context.as_deref(), Some("stg-us"));
         assert_eq!(app.right, RightMode::Browse);
         assert!(app.log_target().is_none());
@@ -2341,10 +2731,170 @@ pub(crate) mod tests {
         let scope = app.scope.clone();
         app.adopt_context(offline_client(), scope, context, "me".into(), "v".into());
         assert_eq!(app.right, RightMode::Detail);
-        assert_eq!(app.view, View::Logs);
+        assert_eq!(app.view, View::Metrics);
         assert_eq!(app.selected_row().unwrap().identity(), "stg-us:shop/api-2");
         assert_eq!(app.rows.len(), 2);
         assert!(app.log_target().is_some());
+    }
+
+    fn pod(name: &str) -> PodInfo {
+        PodInfo {
+            namespace: "shop".into(),
+            name: name.into(),
+            phase: "Running".into(),
+            containers: vec![crate::k8s::ContainerInfo {
+                name: "app".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_logs_merge_every_member_without_switching() {
+        let mut app = test_app(Config::default());
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into()],
+        });
+        // `api` runs on both members; `cart` only here.
+        app.on_listing(Ok(Listing {
+            rows: vec![
+                row("stg-eu", "api"),
+                row("stg-eu", "cart"),
+                row("stg-us", "api"),
+            ],
+            failed: vec![],
+        }));
+        app.inventory.pods = vec![pod("api")];
+        app.inventory_ready = true;
+        // The cursor is on the stg-us row: Enter still stays put.
+        app.row_selected = 2;
+        assert_eq!(app.selected_row().unwrap().context, "stg-us");
+        app.activate_selection();
+        assert!(app.pending_context.is_none(), "logs need no switch");
+        assert_eq!((app.right, app.view), (RightMode::Detail, View::Logs));
+        assert_eq!(app.log_members, vec!["stg-eu", "stg-us"]);
+
+        // This member streams at once, labelled with its cluster.
+        assert_eq!(app.attached, vec![Arc::from("stg-eu|shop/api:app")]);
+
+        // The other member's pods are asked for, in the object's namespace.
+        let request = app.take_fleet_pods_request().unwrap();
+        assert_eq!(request.members, vec!["stg-us"]);
+        assert_eq!(request.namespace, "shop");
+
+        // They arrive: both clusters' replicas are merged.
+        app.on_fleet_pods(
+            request.key,
+            vec![(
+                "stg-us".into(),
+                Ok((offline_client(), vec![pod("api"), pod("other")])),
+            )],
+        );
+        assert_eq!(app.attached.len(), 2);
+        assert!(app.attached.contains(&Arc::from("stg-us|shop/api:app")));
+        assert_eq!(app.log_spread(), (2, 2));
+        assert!(
+            app.status.text.contains("2 pods from 2 of 2 clusters"),
+            "{}",
+            app.status.text
+        );
+
+        // An answer for logs no longer open is dropped.
+        app.on_fleet_pods(
+            "old".into(),
+            vec![("stg-us".into(), Ok((offline_client(), vec![])))],
+        );
+        assert_eq!(app.attached.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn compare_reads_every_member_and_names_the_odd_one() {
+        let mut app = test_app(Config::default());
+        // Outside a fleet there is nothing to compare with.
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('a'))));
+        assert_ne!(app.view, View::Compare);
+
+        app.enter_fleet(Fleet {
+            name: "stg".into(),
+            members: vec!["stg-eu".into(), "stg-us".into(), "stg-ap".into()],
+        });
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api"), row("stg-us", "api")],
+            failed: vec![],
+        }));
+        app.row_selected = 1;
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('a'))));
+        assert!(app.pending_context.is_none(), "compare needs no switch");
+        assert_eq!((app.right, app.view), (RightMode::Detail, View::Compare));
+        let (key, _, namespace, name, members) = app.take_compare_request().unwrap();
+        assert_eq!((namespace.as_str(), name.as_str()), ("shop", "api"));
+        assert_eq!(members, vec!["stg-eu", "stg-us", "stg-ap"]);
+        assert!(app.take_compare_request().is_none(), "asked once");
+
+        let pod = |image: &str| serde_json::json!({"kind": "Pod", "spec": {"containers": [{"image": image}]}});
+        app.on_compare(
+            key,
+            vec![
+                ("stg-eu".into(), Ok(pod("api:2"))),
+                ("stg-us".into(), Ok(pod("api:1"))),
+                ("stg-ap".into(), Err("pods \"api\" not found (404)".into())),
+            ],
+        );
+        assert_eq!(app.compare.len(), 3);
+        assert_eq!(app.compare[2].state, crate::compare::State::Absent);
+        // A tie goes to the first member, so stg-us is the odd one out.
+        assert_eq!(app.status.text, "differs on stg-us");
+    }
+
+    #[tokio::test]
+    async fn v_reveals_a_secret_decoded_and_resets_for_the_next_object() {
+        let mut app = test_app(Config::default());
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "db"), row("stg-eu", "other")],
+            failed: vec![],
+        }));
+        let v = |app: &mut App| app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('v'))));
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('d'))));
+        app.on_describe(Ok(serde_json::json!({
+            "apiVersion": "v1", "kind": "Secret", "data": {"password": "aHVudGVyMg=="}
+        })));
+        assert!(app.describe_text.contains("<redacted, 7 bytes>"));
+        v(&mut app);
+        assert!(
+            app.describe_text.contains("password: hunter2"),
+            "{}",
+            app.describe_text
+        );
+        v(&mut app);
+        assert!(!app.describe_text.contains("hunter2"));
+
+        // Revealed stays with that Secret only: describing the next row
+        // starts hidden again.
+        v(&mut app);
+        assert!(app.secrets_revealed);
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Esc)));
+        app.move_cursor(1);
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('d'))));
+        assert_eq!(app.selected_row().unwrap().name, "other");
+        assert!(!app.secrets_revealed);
+
+        // And it can be switched off for a whole team.
+        let mut config = Config::default();
+        config.describe.allow_reveal = false;
+        let mut app = test_app(config);
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "db")],
+            failed: vec![],
+        }));
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('d'))));
+        app.on_describe(Ok(serde_json::json!({
+            "apiVersion": "v1", "kind": "Secret", "data": {"password": "aHVudGVyMg=="}
+        })));
+        v(&mut app);
+        assert!(!app.describe_text.contains("hunter2"));
+        assert!(app.status.text.contains("allow_reveal"));
     }
 
     #[tokio::test]
@@ -2403,13 +2953,14 @@ pub(crate) mod tests {
             rows: vec![row("stg-us", "api-2")],
             failed: vec![],
         }));
-        app.activate_selection();
+        app.set_view(View::Metrics);
         let context = app.pending_context.take().unwrap();
         let scope = app.scope.clone();
         app.adopt_context(offline_client(), scope, context, "me".into(), "v".into());
         // stg-us is the second context; no configured fleets precede it.
         assert_eq!(app.context_selected, 1);
         // The pod inventory has not arrived yet: that is not "no pods".
+        app.set_view(View::Logs);
         assert_eq!(app.status.text, "waiting for the pod inventory…");
     }
 

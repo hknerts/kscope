@@ -240,14 +240,26 @@ fn default_rule_fg() -> String {
     "magenta".into()
 }
 
-/// The describe overlay.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The describe tab.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DescribeConfig {
     /// Show the values of Secrets instead of `<redacted, N bytes>`. Off by
     /// default so kscope stays safe to hand to people who should not read
     /// credentials, even when it runs with a token that could.
     pub show_secret_values: bool,
+    /// Let `v` reveal a Secret's decoded values on demand. Set it to false
+    /// to hand kscope to people who must never see them on screen.
+    pub allow_reveal: bool,
+}
+
+impl Default for DescribeConfig {
+    fn default() -> Self {
+        Self {
+            show_secret_values: false,
+            allow_reveal: true,
+        }
+    }
 }
 
 impl Config {

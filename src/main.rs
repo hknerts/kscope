@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
             since_seconds: config.logs.since_seconds,
             timestamps: config.logs.timestamps,
             previous: false,
+            context: None,
         };
         print!("{}", k8s::logs::snapshot(client, &spec).await?);
         return Ok(());
@@ -207,34 +208,61 @@ async fn find(
                 || r.namespace.to_ascii_lowercase().contains(&needle)
         })
         .collect();
-    let width = |f: fn(&ResourceRow) -> &str, title: &str| {
-        hits.iter()
-            .map(|r| f(r).chars().count())
-            .chain([title.len()])
-            .max()
-            .unwrap_or(0)
-    };
-    let (wc, wn, wm, ws) = (
-        width(|r| &r.context, "CONTEXT"),
-        width(|r| &r.namespace, "NAMESPACE"),
-        width(|r| &r.name, "NAME"),
-        width(|r| &r.status, "STATUS"),
-    );
-    if !hits.is_empty() {
-        println!(
-            "{:wc$}  {:wn$}  {:wm$}  {:ws$}  AGE",
-            "CONTEXT", "NAMESPACE", "NAME", "STATUS"
+    // Usage after status, as in `kubectl top`; "-" without metrics-server.
+    // Images last, as in `kubectl get -o wide`, as name:version. Both only for
+    // kinds that run or select pods.
+    let usage = hits.iter().any(|r| r.runs_pods());
+    let images = hits.iter().any(|r| !r.images.is_empty());
+    let mut table: Vec<Vec<String>> = vec![["CONTEXT", "NAMESPACE", "NAME", "STATUS"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(
+            usage
+                .then(|| ["CPU".to_string(), "MEMORY".to_string()])
+                .into_iter()
+                .flatten(),
+        )
+        .chain(["AGE".to_string()])
+        .chain(images.then(|| "IMAGE".to_string()))
+        .collect()];
+    for r in &hits {
+        let (cpu, mem) = k8s::resources::fmt_usage(r.usage);
+        let image = r
+            .images
+            .iter()
+            .map(|i| k8s::resources::short_image(i))
+            .collect::<Vec<_>>()
+            .join(",");
+        table.push(
+            [&r.context, &r.namespace, &r.name, &r.status]
+                .into_iter()
+                .cloned()
+                .chain(usage.then_some([cpu, mem]).into_iter().flatten())
+                .chain([k8s::fmt_age(r.age_seconds)])
+                .chain(images.then_some(image))
+                .collect(),
         );
     }
-    for r in &hits {
-        println!(
-            "{:wc$}  {:wn$}  {:wm$}  {:ws$}  {}",
-            r.context,
-            r.namespace,
-            r.name,
-            r.status,
-            k8s::fmt_age(r.age_seconds)
-        );
+    if hits.is_empty() {
+        table.clear();
+    }
+    let columns = table.first().map_or(0, Vec::len);
+    let widths: Vec<usize> = (0..columns)
+        .map(|c| {
+            table
+                .iter()
+                .map(|row| row[c].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    for row in &table {
+        let line: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:width$}"))
+            .collect();
+        println!("{}", line.join("  ").trim_end());
     }
     Ok(!hits.is_empty())
 }
@@ -366,6 +394,10 @@ async fn run(
     // Node journals are a one-shot fetch rather than a stream.
     type NodeLogs = (String, &'static str, Result<String, String>);
     let (node_tx, mut node_rx) = tokio::sync::mpsc::channel::<NodeLogs>(4);
+    // The other fleet members' pods, for logs merged across a fleet.
+    type Compared = (String, Vec<(String, Result<serde_json::Value, String>)>);
+    let (cmp_tx, mut cmp_rx) = tokio::sync::mpsc::channel::<Compared>(4);
+    let (fpod_tx, mut fpod_rx) = tokio::sync::mpsc::channel::<(String, k8s::fleet::MemberPods)>(4);
     let (desc_tx, mut desc_rx) = tokio::sync::mpsc::channel::<Result<serde_json::Value, String>>(4);
     // PVC usage lives on the kubelet, not the API server, so it is polled
     // separately and is allowed to be unavailable.
@@ -433,6 +465,9 @@ async fn run(
     // eagerly than a single cluster's: N clusters × thousands of pods every
     // five seconds is real load on the API servers for little gain.
     let fleet_refresh = list_refresh.max(FLEET_REFRESH);
+    // Fleet-wide logs re-read the other members' pods on the same interval,
+    // so a rollout there hands the stream over to the new pods.
+    let mut last_member_pods = Instant::now();
 
     loop {
         let next_frame = tokio::time::Instant::from_std(last_draw + frame_budget);
@@ -503,6 +538,8 @@ async fn run(
                 app.on_node_logs(node, service, result);
             }
             Some(result) = desc_rx.recv() => app.on_describe(result),
+            Some((key, answers)) = fpod_rx.recv() => app.on_fleet_pods(key, answers),
+            Some((key, answers)) = cmp_rx.recv() => app.on_compare(key, answers),
             Some(result) = vol_rx.recv() => app.on_volume_usage(result),
             _ = tokio::time::sleep_until(next_frame), if app.dirty => {}
             _ = ticker.tick() => {}
@@ -536,6 +573,29 @@ async fn run(
                 met_tx.clone(),
                 evt_tx.clone(),
             );
+        }
+
+        if app.fleet.is_some() && last_member_pods.elapsed() >= fleet_refresh {
+            last_member_pods = Instant::now();
+            app.refresh_fleet_pods();
+        }
+        if let Some(request) = app.take_fleet_pods_request() {
+            let clients = fleet_clients.clone();
+            let tx = fpod_tx.clone();
+            tokio::spawn(async move {
+                let answers =
+                    k8s::fleet::pods(&clients, &request.members, &request.namespace).await;
+                let _ = tx.send((request.key, answers)).await;
+            });
+        }
+
+        if let Some((key, kind, namespace, name, members)) = app.take_compare_request() {
+            let clients = fleet_clients.clone();
+            let tx = cmp_tx.clone();
+            tokio::spawn(async move {
+                let answers = k8s::fleet::get(&clients, &members, &kind, &namespace, &name).await;
+                let _ = tx.send((key, answers)).await;
+            });
         }
 
         // Service a pending describe request.

@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 use super::discovery::Scope;
 use super::resources::{ResourceRow, ResourceType};
+use super::PodInfo;
 
 /// How long one member may take to answer before it is reported unreachable.
 pub const MEMBER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -214,6 +215,85 @@ pub async fn list(
         (&a.context, &a.namespace, &a.name).cmp(&(&b.context, &b.namespace, &b.name))
     });
     listing
+}
+
+/// Run `job` on every member at once, each bounded by [`MEMBER_TIMEOUT`].
+/// Answers come back in member order, a failure or timeout as an error.
+async fn on_each<T, F, Fut>(
+    clients: &Clients,
+    members: &[String],
+    job: F,
+) -> Vec<(String, Result<T, String>)>
+where
+    F: Fn(kube::Client) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let job = &job;
+    let tasks = members.iter().map(|context| async move {
+        let result = tokio::time::timeout(MEMBER_TIMEOUT, async {
+            let client = clients.get(context).await?;
+            job(client).await
+        })
+        .await;
+        let result = match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(err)) => Err(format!("{err:#}")),
+            Err(_) => Err(format!("no answer in {}s", MEMBER_TIMEOUT.as_secs())),
+        };
+        (context.clone(), result)
+    });
+    futures::future::join_all(tasks).await
+}
+
+/// Per member: its client and pods, or why it did not answer.
+pub type MemberPods = Vec<(String, Result<(kube::Client, Vec<PodInfo>), String>)>;
+
+/// The pods of `namespace` on each member, with the member's client so their
+/// logs can be streamed from there. Shaped like the watched inventory, so the
+/// same rules pick a workload's replicas on every cluster.
+pub async fn pods(clients: &Clients, members: &[String], namespace: &str) -> MemberPods {
+    on_each(clients, members, |client| async move {
+        let pods = namespace_pods(&client, namespace).await?;
+        Ok((client, pods))
+    })
+    .await
+}
+
+async fn namespace_pods(client: &kube::Client, namespace: &str) -> anyhow::Result<Vec<PodInfo>> {
+    use k8s_openapi::api::apps::v1::ReplicaSet;
+    use k8s_openapi::api::core::v1::Pod;
+    use kube::api::{Api, ListParams};
+
+    let params = ListParams::default();
+    let pods: Vec<Arc<Pod>> = Api::<Pod>::namespaced(client.clone(), namespace)
+        .list(&params)
+        .await?
+        .items
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    // Needed to resolve a pod's ReplicaSet up to its Deployment. Best effort,
+    // as in the inventory: without it Deployments simply match no pods.
+    let replicasets: Option<Vec<_>> = Api::<ReplicaSet>::namespaced(client.clone(), namespace)
+        .list_metadata(&params)
+        .await
+        .ok()
+        .map(|list| list.items.into_iter().map(Arc::new).collect());
+    Ok(super::discovery::build(&pods, replicasets.as_deref(), &[], None, &[]).pods)
+}
+
+/// One object, fetched from every member: what the compare tab lines up.
+pub async fn get(
+    clients: &Clients,
+    members: &[String],
+    kind: &ResourceType,
+    namespace: &str,
+    name: &str,
+) -> Vec<(String, Result<serde_json::Value, String>)> {
+    on_each(clients, members, |client| async move {
+        super::resources::get(&client, kind, namespace, name).await
+    })
+    .await
 }
 
 #[cfg(test)]

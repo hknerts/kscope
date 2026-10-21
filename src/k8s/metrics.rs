@@ -26,7 +26,20 @@ pub struct ContainerSample {
 pub struct PodSample {
     pub namespace: String,
     pub name: String,
+    /// The pod's labels, which metrics-server copies over: they let a
+    /// Deployment or Service add up its pods without listing them.
+    pub labels: std::collections::BTreeMap<String, String>,
     pub containers: Vec<ContainerSample>,
+}
+
+impl PodSample {
+    pub fn cpu_milli(&self) -> f64 {
+        self.containers.iter().map(|c| c.cpu_milli).sum()
+    }
+
+    pub fn mem_bytes(&self) -> f64 {
+        self.containers.iter().map(|c| c.mem_bytes).sum()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -171,8 +184,25 @@ fn decode_pod(obj: &DynamicObject) -> Option<PodSample> {
     Some(PodSample {
         namespace,
         name,
+        labels: obj.metadata.labels.clone().unwrap_or_default(),
         containers,
     })
+}
+
+/// Current usage of every pod in `scope`, for the list's cpu and memory
+/// columns. One LIST against metrics.k8s.io, without the node half of
+/// [`poll`].
+pub async fn pod_usage(client: &kube::Client, scope: &Scope) -> Result<Vec<PodSample>> {
+    let ar = pod_metrics_resource();
+    let api: Api<DynamicObject> = match scope {
+        Scope::AllNamespaces => Api::all_with(client.clone(), &ar),
+        Scope::Namespace(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+    };
+    let list = api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| anyhow!(unavailable_reason(&e)))?;
+    Ok(list.items.iter().filter_map(decode_pod).collect())
 }
 
 fn decode_node(obj: &DynamicObject) -> Option<NodeSample> {

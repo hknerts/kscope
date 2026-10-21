@@ -9,7 +9,8 @@
 //! Secret values are redacted unless the user opts in: kscope is meant to be
 //! safe to hand to anyone, and describe must not be the easiest way to read
 //! credentials out of a cluster. Keys and sizes stay visible, because "is the
-//! key there, and is it empty?" is what you are usually checking.
+//! key there, and is it empty?" is what you are usually checking. Revealed
+//! values are shown decoded, not as base64.
 //!
 //! The emitter is written out rather than pulled in: `serde_yaml` is
 //! unmaintained, and a read-only viewer should not add an advisory to the
@@ -27,11 +28,13 @@ const HIDDEN_ANNOTATIONS: [&str; 2] = [
 ];
 
 /// Strip the bookkeeping, then render as YAML. Secret values are replaced by
-/// their size unless `reveal_secrets` is set.
+/// their size unless `reveal_secrets` is set, and then shown decoded.
 pub fn render(object: &Value, reveal_secrets: bool) -> String {
     let mut cleaned = object.clone();
     redact(&mut cleaned);
-    if !reveal_secrets {
+    if reveal_secrets {
+        decode_secret_values(&mut cleaned);
+    } else {
         hide_secret_values(&mut cleaned);
     }
     let mut out = String::new();
@@ -84,6 +87,36 @@ fn hide_secret_values(object: &mut Value) {
             };
             *value = Value::String(format!("<redacted, {bytes} bytes>"));
         }
+    }
+}
+
+/// Is this object a Secret, whose values `v` can reveal?
+pub fn has_secret_values(object: &Value) -> bool {
+    is_secret(object)
+}
+
+/// Replace every base64 value under `data` with its decoded text. Bytes that
+/// are not UTF-8 (keystores, images) are named instead of printed.
+fn decode_secret_values(object: &mut Value) {
+    use base64::Engine as _;
+    if !is_secret(object) {
+        return;
+    }
+    let Some(map) = object.get_mut("data").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for value in map.values_mut() {
+        let Some(encoded) = value.as_str() else {
+            continue;
+        };
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(err) => format!("<binary, {} bytes>", err.as_bytes().len()),
+            },
+            Err(_) => format!("<not base64: {encoded}>"),
+        };
+        *value = Value::String(decoded);
     }
 }
 
@@ -229,7 +262,23 @@ mod tests {
 
     #[test]
     fn secret_values_can_be_revealed_explicitly() {
-        assert!(render(&secret(), true).contains("password: aHVudGVyMg=="));
+        let got = render(&secret(), true);
+        // Decoded, not base64.
+        assert!(got.contains("password: hunter2"), "{got}");
+        assert!(!got.contains("aHVudGVyMg"), "{got}");
+        assert!(got.contains("note: plain text"), "{got}");
+    }
+
+    #[test]
+    fn revealed_binary_values_are_named_not_printed() {
+        let keystore = json!({
+            "apiVersion": "v1", "kind": "Secret",
+            // 0xff 0xfe 0x00: not UTF-8.
+            "data": {"keystore": "//4A", "bad": "%%%"}
+        });
+        let got = render(&keystore, true);
+        assert!(got.contains("keystore: <binary, 3 bytes>"), "{got}");
+        assert!(got.contains("<not base64: %%%>"), "{got}");
     }
 
     #[test]

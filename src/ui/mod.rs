@@ -5,6 +5,7 @@
 //! Two panes: contexts on the left, and on the right either the resource
 //! browser or, once something is opened, its logs / metrics / events.
 
+mod compare;
 mod contexts;
 mod describe;
 mod events;
@@ -104,7 +105,15 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         ),
         ("d", "describe", app.describe_open),
     ];
-    for (key, name, active) in tabs {
+    // Only a fleet has other clusters to compare with.
+    let compare = app.fleet.as_ref().map(|_| {
+        (
+            "a",
+            "all clusters",
+            app.view == View::Compare && !app.describe_open,
+        )
+    });
+    for (key, name, active) in tabs.into_iter().chain(compare) {
         if active {
             spans.push(Span::styled(format!(" {key} {name} "), on));
         } else {
@@ -124,6 +133,7 @@ fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
         View::Logs => logs::draw(f, app, rows[1]),
         View::Metrics => metrics::draw(f, app, rows[1]),
         View::Events => events::draw(f, app, rows[1]),
+        View::Compare => compare::draw(f, app, rows[1]),
     }
 }
 
@@ -468,6 +478,10 @@ fn draw_shortcuts(f: &mut Frame, app: &App, area: Rect) {
                     bindings.push(("W", "warnings only"));
                     bindings.push(("j/k", "move"));
                 }
+                View::Compare => {
+                    bindings.push(("a", "ask every cluster again"));
+                    bindings.push(("l", "logs from all of them"));
+                }
             }
             bindings.push(("Esc", "back to the list"));
         }
@@ -573,6 +587,16 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 dim,
             );
         }
+        // Describe covers whichever tab was open; its facts are its own.
+        RightMode::Detail if app.describe_open => {
+            fact(format!("{} lines", app.describe_len()), dim);
+            if app.secrets_revealed {
+                fact(
+                    "secret values shown".to_string(),
+                    Style::default().fg(theme.warn()),
+                );
+            }
+        }
         RightMode::Detail => match app.view {
             View::Logs => {
                 let (shown, kept) = (app.buffer.view_len(), app.buffer.len());
@@ -614,6 +638,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(theme.warn()),
                     );
                 }
+            }
+            View::Compare => {
+                fact(format!("{} clusters", app.compare.len()), dim);
             }
             View::Metrics => {
                 fact(format!("sorted by {}", app.sort_by.label()), dim);
