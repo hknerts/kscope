@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-10-21
+
 ### Fixed
 
 - **Describe is a tab, not a window.** `l`, `m` and `e` now lead straight on
