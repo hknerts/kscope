@@ -9,6 +9,16 @@ use anyhow::{Context, Result};
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 
+/// Fleets every user gets without a config file. They only show up in the
+/// contexts pane when some context matches.
+pub const DEFAULT_FLEETS: &[(&str, &[&str])] = &[
+    ("stg", &["*stg*", "*staging*"]),
+    ("prod", &["*prod*", "*prd*"]),
+];
+
+/// `KSCOPE_FLEET_STG="stg-eu-*,qa-eu"` defines (or overrides) fleet `stg`.
+pub const FLEET_ENV_PREFIX: &str = "KSCOPE_FLEET_";
+
 /// Root configuration object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -261,6 +271,41 @@ impl Config {
             .with_context(|| format!("reading config file {}", path.display()))?;
         toml::from_str(&raw).with_context(|| format!("parsing config file {}", path.display()))
     }
+
+    /// [`Config::load`] plus the fleets that do not come from the file: the
+    /// built-in `stg` and `prod`, and `KSCOPE_FLEET_<NAME>` variables.
+    pub fn load_with_env(path: Option<&Path>) -> Result<Self> {
+        let mut config = Self::load(path)?;
+        config.merge_fleets(std::env::vars());
+        Ok(config)
+    }
+
+    /// Layer the fleet sources, lowest priority first: [`DEFAULT_FLEETS`],
+    /// the `[fleets]` table, then `KSCOPE_FLEET_<NAME>=glob,glob` variables.
+    /// An empty list or variable switches a fleet off.
+    pub fn merge_fleets(&mut self, env: impl IntoIterator<Item = (String, String)>) {
+        for (name, globs) in DEFAULT_FLEETS {
+            self.fleets
+                .entry((*name).to_string())
+                .or_insert_with(|| globs.iter().map(|g| (*g).to_string()).collect());
+        }
+        for (key, value) in env {
+            let Some(name) = key.strip_prefix(FLEET_ENV_PREFIX) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let globs = value
+                .split(',')
+                .map(str::trim)
+                .filter(|g| !g.is_empty())
+                .map(String::from)
+                .collect();
+            self.fleets.insert(name.to_ascii_lowercase(), globs);
+        }
+        self.fleets.retain(|_, globs| !globs.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +338,47 @@ mod tests {
         assert_eq!(c.fleets["staging"], vec!["stg-*"]);
         assert_eq!(c.fleets["prod"].len(), 2);
         assert!(Config::default().fleets.is_empty());
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn stg_and_prod_are_built_in() {
+        let mut c = Config::default();
+        c.merge_fleets(env(&[]));
+        assert_eq!(c.fleets["stg"], vec!["*stg*", "*staging*"]);
+        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*"]);
+    }
+
+    #[test]
+    fn the_file_overrides_a_built_in_fleet_and_keeps_the_others() {
+        let mut c: Config = toml::from_str("[fleets]\nstg = [\"kind-stg-*\"]\n").unwrap();
+        c.merge_fleets(env(&[]));
+        assert_eq!(c.fleets["stg"], vec!["kind-stg-*"]);
+        assert_eq!(c.fleets["prod"], vec!["*prod*", "*prd*"]);
+    }
+
+    #[test]
+    fn env_wins_over_the_file_and_can_switch_a_fleet_off() {
+        let mut c: Config =
+            toml::from_str("[fleets]\nstg = [\"kind-stg-*\"]\nqa = [\"qa-*\"]\n").unwrap();
+        c.merge_fleets(env(&[
+            ("KSCOPE_FLEET_STG", "stg-eu-1, stg-us-*"),
+            ("KSCOPE_FLEET_PROD", ""),
+            ("KSCOPE_FLEET_EDGE", "edge-*"),
+            ("KSCOPE_FLEET", "stg"),
+            ("KSCOPE_NAMESPACE", "shop"),
+        ]));
+        assert_eq!(c.fleets["stg"], vec!["stg-eu-1", "stg-us-*"]);
+        assert_eq!(c.fleets["qa"], vec!["qa-*"]);
+        assert_eq!(c.fleets["edge"], vec!["edge-*"]);
+        assert!(!c.fleets.contains_key("prod"));
+        assert_eq!(c.fleets.len(), 3);
     }
 
     #[test]

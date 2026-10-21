@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli);
 
-    let mut config = Config::load(cli.config.as_deref())?;
+    let mut config = Config::load_with_env(cli.config.as_deref())?;
     if let Some(tail) = cli.tail {
         config.logs.tail_lines = tail;
     }

@@ -19,9 +19,12 @@ show_secret_values = false
 
 [fleets]
 # Named sets of kubeconfig contexts, listed as one (globs: * and ?). They show
-# up at the top of the contexts pane; `kscope --fleet staging` starts on one.
-# staging = ["stg-*"]
-# prod = ["prod-eu-*", "prod-us-1"]
+# up at the top of the contexts pane; `kscope --fleet stg` starts on one.
+# Built in: stg = ["*stg*", "*staging*"] and prod = ["*prod*", "*prd*"].
+# An entry here replaces the built-in of the same name; [] switches it off.
+# KSCOPE_FLEET_<NAME>="glob,glob" in the environment wins over this file.
+# stg = ["kind-stg-*"]
+# qa = ["qa-*"]
 
 [logs]
 # Lines kept in memory. 0 (the default) means unlimited: nothing is ever

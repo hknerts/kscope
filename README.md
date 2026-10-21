@@ -82,8 +82,9 @@ one screen:
   the real container state rather than the phase: a pod stuck in
   `CrashLoopBackOff` still reports phase `Running`, and that is exactly the one
   you need to find.
-* **Fleets** — an environment is rarely one cluster. Group contexts into a
-  fleet (`staging = ["stg-*"]`) and every listing spans all of them at once,
+* **Fleets** — an environment is rarely one cluster. `stg` and `prod` are
+  built in, more come from the config or `KSCOPE_FLEET_<NAME>`, and every
+  listing spans all members at once,
   tagged with the cluster each row came from. Filter, triage and open as
   usual: `Enter` on a row from another cluster switches there and opens it.
   See [Fleets: many clusters as one](#fleets-many-clusters-as-one).
@@ -250,28 +251,55 @@ kscope -u stg                     # or browse them in the TUI and open what you 
 ```
 
 `-u` (`--fleet`) takes a word, a glob or a fleet name. A plain word such as
-`stg` selects every kubeconfig context whose name contains it. It means one
+`qa` selects every kubeconfig context whose name contains it. It means one
 context only when a context has exactly that name. `stg-*,qa-eu` are globs.
-To give a set a name of its own, put it in the config:
 
-```toml
-# config.toml (see Configuration for where it lives)
-[fleets]
-staging = ["stg-*"]                  # globs over kubeconfig context names
-prod    = ["prod-eu-*", "prod-us-1"]
+### Setting up fleets
+
+Two fleets are built in, so most setups need no configuration at all:
+
+| Fleet | Matches contexts named like |
+| --- | --- |
+| `stg` | `*stg*`, `*staging*` |
+| `prod` | `*prod*`, `*prd*` |
+
+Each source below overrides the one above it for the same fleet name, and
+fleets with other names are added alongside:
+
+1. **Built in**: `stg` and `prod` as above.
+2. **Config file**, under `[fleets]` (see [Configuration](#configuration) for
+   where it lives):
+
+   ```toml
+   [fleets]
+   stg     = ["kind-stg-*"]               # replaces the built-in stg
+   prod    = ["prod-eu-*", "prod-us-1"]
+   qa      = ["qa-*"]                     # a fleet of your own
+   ```
+
+3. **Environment**, which wins when it is set. `KSCOPE_FLEET_<NAME>` holds
+   comma-separated globs. The name is lower-cased:
+
+   ```sh
+   export KSCOPE_FLEET_STG="stg-eu-*,stg-us-1"   # fleet "stg", over the file
+   export KSCOPE_FLEET_EDGE="edge-*"             # fleet "edge"
+   export KSCOPE_FLEET_PROD=""                   # switch prod off
+   ```
+
+An empty list (`prod = []`) or an empty variable switches a fleet off.
+`KSCOPE_FLEET` (with no suffix) is different: it is the same as `-u` and picks
+the fleet to start on.
+
+A fleet appears at the top of the contexts pane, marked `◇`, when at least one
+context matches it. kscope does not invent other groups from context names. A
+set that is not configured is still one `-u qa` or one `/` on the pane away.
+`Enter` on a fleet (or `kscope -u stg`) lists the current kind on **every
+member at once**, with a `context` column:
+
 ```
-
-Fleets defined under `[fleets]` appear at the top of the contexts pane, marked
-`◇`. **Only those fleets are listed there.** kscope does not invent groups
-from context names. With no `[fleets]` section the pane lists only contexts,
-and a fleet is opened with `-u stg` or with `/` on the pane.
-`Enter` on a fleet (or `kscope -u staging`) lists the current kind on **every
-member at once**, with a `context` column. With the config above:
-
-```
-┌─ contexts ─────┐┌─ pods /checkout/ · all · fleet staging ─────────────────┐
+┌─ contexts ─────┐┌─ pods /checkout/ · all · fleet stg ─────────────────────┐
 │◇ prod ×2       ││context      namespace  name                   status    │
-│◆ staging ×5    ││stg-eu-1     shop       checkout-b9d96-nfps9   Running   │
+│◆ stg ×5        ││stg-eu-1     shop       checkout-b9d96-nfps9   Running   │
 │  prod-eu-1     ││stg-eu-1     shop       checkout-canary        Running   │
 │· stg-eu-1      ││stg-us-2     shop       checkout-84757-ffk7f   Running   │
 │● stg-us-2      ││stg-us-2     shop       payments-broken        CrashLoop │
@@ -291,7 +319,7 @@ member at once**, with a `context` column. With the config above:
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
 `Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to
 answer. An unreachable cluster is reported in the status bar and the header
-(`◆ staging 4/5`). It never blocks the rest. kscope starts on your current context
+(`◆ stg 4/5`). It never blocks the rest. kscope starts on your current context
 if it is a member, otherwise on the first member that answers.
 
 Without the TUI, `kscope get KIND [NAME] -u FLEET` prints the matches and
@@ -370,8 +398,8 @@ max_fps = 30
 [describe]
 show_secret_values = false   # Secrets render as <redacted, N bytes>
 
-[fleets]                     # contexts browsed as one, by glob
-staging = ["stg-*"]
+[fleets]                     # contexts browsed as one, by glob; stg and prod
+qa = ["qa-*"]                # are built in, KSCOPE_FLEET_<NAME> overrides
 
 [logs]
 buffer_lines = 0     # 0 = unlimited (default): never evict

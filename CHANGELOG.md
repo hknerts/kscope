@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in `stg` and `prod` fleets.** `stg` matches contexts named
+  `*stg*` or `*staging*`, `prod` matches `*prod*` or `*prd*`. They appear in
+  the contexts pane whenever a context matches, with no config file.
+- **Fleets from the environment.** `KSCOPE_FLEET_<NAME>="glob,glob"` defines
+  a fleet or overrides one. The environment wins over `[fleets]` in the
+  config file, which wins over the built-ins. An empty value or `[]` switches
+  a fleet off.
+
 ## [1.5.0] - 2026-10-21
 
 ### Changed
