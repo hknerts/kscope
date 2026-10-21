@@ -763,8 +763,7 @@ impl App {
             self.set_view(view);
         }
         if open.describe {
-            self.describe_open = true;
-            self.sync_describe();
+            self.open_describe();
         }
     }
 
@@ -984,7 +983,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Open or close the describe overlay for the object in hand.
+    /// Open or close the describe tab for the object in hand.
     fn toggle_describe(&mut self) {
         if self.describe_open {
             self.describe_open = false;
@@ -1001,7 +1000,16 @@ impl App {
         if self.open_remote(view, true) {
             return;
         }
+        self.open_describe();
+    }
+
+    /// Describe is a tab like logs, metrics and events: it opens the detail
+    /// pane, so `l`, `m` and `e` lead straight on from it.
+    fn open_describe(&mut self) {
         self.describe_open = true;
+        if self.selected_row().is_some() {
+            self.right = RightMode::Detail;
+        }
         self.sync_describe();
         self.dirty = true;
     }
@@ -1745,10 +1753,11 @@ impl App {
         }
     }
 
-    /// `Esc` steps back out: describe → detail → browse → quit.
+    /// `Esc` steps back out: any tab, describe included → browse → quit.
     fn on_escape(&mut self) {
         if self.describe_open {
             self.describe_open = false;
+            self.right = RightMode::Browse;
             self.dirty = true;
             return;
         }
@@ -1910,9 +1919,11 @@ impl App {
     }
 
     fn set_view(&mut self, view: View) {
-        if self.open_remote(Some(view), self.describe_open) {
+        if self.open_remote(Some(view), false) {
             return;
         }
+        // Picking another tab leaves describe, as it leaves any tab.
+        self.describe_open = false;
         self.view = view;
         // Picking a tab is also how you open the detail pane.
         if self.right == RightMode::Browse && self.selected_row().is_some() {
@@ -2262,6 +2273,42 @@ pub(crate) mod tests {
         // Once the matched line itself is evicted there is no current match.
         app.on_log(batch(74..120));
         assert_eq!(app.search.current, None);
+    }
+
+    #[tokio::test]
+    async fn describe_is_a_tab_you_can_leave_for_logs() {
+        let mut app = test_app(Config::default());
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api-1")],
+            failed: vec![],
+        }));
+        let key = |app: &mut App, c: char| {
+            app.on_event(Event::Key(KeyEvent::from(KeyCode::Char(c))));
+        };
+
+        // `d` from the list opens the detail pane on the describe tab.
+        key(&mut app, 'd');
+        assert!(app.describe_open);
+        assert_eq!(app.right, RightMode::Detail);
+
+        // `l` leads straight on to the logs, as from any other tab.
+        key(&mut app, 'l');
+        assert!(!app.describe_open);
+        assert_eq!((app.right, app.view), (RightMode::Detail, View::Logs));
+
+        // And back: `d` again, then `m` for metrics.
+        key(&mut app, 'd');
+        assert!(app.describe_open);
+        key(&mut app, 'm');
+        assert!(!app.describe_open);
+        assert_eq!(app.view, View::Metrics);
+
+        // Esc leaves describe for the list, like every tab.
+        key(&mut app, 'd');
+        app.on_event(Event::Key(KeyEvent::from(KeyCode::Esc)));
+        assert!(!app.describe_open);
+        assert_eq!(app.right, RightMode::Browse);
+        assert!(!app.should_quit);
     }
 
     #[tokio::test]

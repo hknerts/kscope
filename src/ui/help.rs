@@ -54,7 +54,7 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j k  ↑ ↓", "move;  Ctrl-d/u half page,  g/G top/bottom"),
             ("Tab", "between clusters and the list"),
-            ("Esc", "back one step: describe, then the object, then quit"),
+            ("Esc", "back one step: from any tab to the list, then quit"),
             ("?", "this help"),
             ("q  Ctrl-c", "quit"),
         ],

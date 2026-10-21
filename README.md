@@ -201,7 +201,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | --- | --- |
 | `Enter`, `l` | open the object's logs |
 | `m` / `e` | open its metrics / events |
-| `d` | describe it in the right pane (`d` or `Esc` closes) |
+| `d` | describe it: a tab like `l` `m` `e`, which lead straight on from it |
 | `/` | filter the list by name or namespace |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |

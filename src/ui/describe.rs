@@ -21,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border_focus()))
-        .title(format!(" describe · {subject}   d or Esc to close "));
+        .title(format!(" describe · {subject} "));
 
     // Drawn in the right-hand pane, where the list or the open tab was: the
     // contexts, header and status stay in place around it.

@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Describe is a tab, not a window.** `l`, `m` and `e` now lead straight on
+  from describe to logs, metrics and events. `d` from the list opens the
+  detail pane on the describe tab, and `Esc` goes back to the list as from
+  any tab.
+
 ## [1.6.1] - 2026-10-21
 
 ### Changed
