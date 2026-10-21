@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-21
+
 ### Added
 
 - **Logs from every cluster of a fleet.** `Enter` (or `l`) on a workload in
