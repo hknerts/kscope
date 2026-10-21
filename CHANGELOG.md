@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-21
+
 ### Added
 
 - **Built-in `stg` and `prod` fleets.** `stg` matches contexts named
@@ -15,6 +17,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a fleet or overrides one. The environment wins over `[fleets]` in the
   config file, which wins over the built-ins. An empty value or `[]` switches
   a fleet off.
+
+### Documentation
+
+- The README explains how to set fleets up (built-ins, config file,
+  environment and their order) and compares fleets with k9s, which shows one
+  context at a time.
 
 ## [1.5.0] - 2026-10-21
 

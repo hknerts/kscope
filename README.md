@@ -109,6 +109,20 @@ replica, a repeating `FailedScheduling`: visible before they become an outage.
 kscope will not stop a bad deploy; it shortens the gap between something breaking
 and somebody noticing.
 
+The second difference is **how many clusters you see at once**. k9s shows one
+context at a time: `:ctx` switches, and there is no list that spans clusters.
+kscope has [fleets](#fleets-many-clusters-as-one): one list across every
+cluster of an environment, with a `context` column.
+
+| | k9s | kscope |
+| --- | --- | --- |
+| Clusters in one view | one context at a time | a whole fleet (`-u stg`) |
+| Search across clusters | switch with `:ctx` and search each one | `/checkout` filters every member at once |
+| Open a row from another cluster | switch context first | `Enter` switches there and opens it |
+| Environment groups | none | `stg` and `prod` built in, more via `[fleets]` or `KSCOPE_FLEET_<NAME>` |
+| One-shot listing | none (it is TUI only) | `kscope get pods -u prod`, with a `CONTEXT` column |
+| A cluster that is down | that context fails | reported in the header; the others still list |
+
 ## Install
 
 ### Release binaries
