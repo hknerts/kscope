@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`s` saves logs to the data directory, not the working directory.** Run
+  from a repository, kscope no longer fills the checkout with
+  `kscope-*.log` files. The new `logs.save_dir` key picks another directory
+  (`~/` works); the default is the platform data directory
+  (`~/.local/share/kscope` on Linux). The directory is created when missing,
+  and the status bar shows the full path written.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added

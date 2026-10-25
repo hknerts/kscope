@@ -45,6 +45,12 @@ follow = true
 wrap = false
 # Searches are case-insensitive unless the query contains an upper-case letter.
 smart_case = true
+# Where `s` saves the visible buffer (kscope-YYYYMMDD-HHMMSS.log). Omit for
+# the platform data directory: ~/.local/share/kscope (Linux),
+# ~/Library/Application Support/io.kscope.kscope (macOS),
+# %APPDATA%\kscope\kscope\data (Windows). Never the working directory unless
+# set to it. `~/` is the home directory; created when missing.
+# save_dir = "~/kscope-logs"
 
 [metrics]
 refresh_ms = 5000
