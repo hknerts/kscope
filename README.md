@@ -15,6 +15,16 @@ token, it cannot be the cause of an incident, and it stays fast because it never
 has to be anything else.
 
 ![kscope](assets/banner.png)
+<!-- An animated demo can be regenerated with `make demo` (hack/demo.tape, needs vhs). -->
+
+```sh
+curl -sSfL https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz | tar xz && sudo install kscope /usr/local/bin/
+cargo install --locked --git https://github.com/hknerts/kscope      # any platform, Rust 1.89+
+docker run --rm -it -v ~/.kube:/home/nonroot/.kube:ro ghcr.io/hknerts/kscope:latest
+```
+
+macOS (Intel and Apple Silicon), Linux arm64 and Windows archives: see [Install](#install).
+Then run `kscope`, or `kscope -u stg` to browse every staging cluster as one.
 
 <table>
   <tr>
@@ -29,6 +39,12 @@ has to be anything else.
     <code>Enter</code> on a deployment merges its replicas' logs, wherever they run. <code>m</code> shows what they use.</sub></td>
   </tr>
 </table>
+
+**Contents:** [How it works](#how-it-works) · [Why](#why) ·
+[kscope or k9s?](#kscope-or-k9s) · [Install](#install) · [Usage](#usage) ·
+[Key bindings](#key-bindings) · [Fleets](#fleets-many-clusters-as-one) ·
+[Configuration](#configuration) · [Permissions](#permissions) ·
+[Contributing](#contributing)
 
 ## How it works
 
@@ -133,15 +149,27 @@ cluster of an environment, with a `context` column.
 
 ### Release binaries
 
-Binaries for Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) and Windows
-are attached to every [release](https://github.com/hknerts/kscope/releases).
+Every [release](https://github.com/hknerts/kscope/releases) attaches an archive
+and a `.sha256` for each target:
+
+| Platform | Archive |
+| --- | --- |
+| Linux x86_64 | `kscope-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `kscope-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `kscope-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `kscope-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `kscope-x86_64-pc-windows-msvc.zip` |
 
 ```sh
-curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz
-curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-x86_64-unknown-linux-gnu.tar.gz.sha256
-shasum -a 256 -c kscope-x86_64-unknown-linux-gnu.tar.gz.sha256   # from the next release on
-tar xzf kscope-x86_64-unknown-linux-gnu.tar.gz && sudo install kscope /usr/local/bin/
+target=aarch64-apple-darwin   # one of the names above
+curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-$target.tar.gz
+curl -sSfLO https://github.com/hknerts/kscope/releases/latest/download/kscope-$target.tar.gz.sha256
+shasum -a 256 -c kscope-$target.tar.gz.sha256
+tar xzf kscope-$target.tar.gz && sudo install kscope /usr/local/bin/
 ```
+
+On macOS, a binary downloaded with a browser rather than `curl` is
+quarantined; `xattr -d com.apple.quarantine kscope` clears it.
 
 ### From source
 
@@ -590,7 +618,8 @@ cargo run -- -u stg    # you are now browsing two clusters at once
   [ARCHITECTURE.md](docs/ARCHITECTURE.md) explains why it is built this way.
 
 The one rule is that kscope stays read-only. Everyone taking part is expected to
-follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+follow the [Code of Conduct](CODE_OF_CONDUCT.md). Getting help:
+[SUPPORT.md](SUPPORT.md); who decides what: [MAINTAINERS.md](MAINTAINERS.md).
 
 ## License
 
