@@ -390,6 +390,20 @@ workload's or Service's summed over its pods, `-` when a cluster has no
 metrics-server or a pod is not running. `IMAGE` is `name:version` without the
 registry. Kinds that run no pods (ConfigMaps, say) get neither column.
 
+For scripts, `-o json` prints a JSON array of
+`{context, namespace, name, status, age_seconds}` (`[]` when nothing matches),
+and `-o name` prints `context/namespace/name`, one per line. The namespace is
+empty for cluster-scoped kinds (`kind-stg-eu//worker`):
+
+```console
+$ kscope get pods -u stg -o json | jq -r '.[] | select(.status != "Running") | .name'
+$ kscope get deploy -u stg -n shop -o name
+kind-stg-eu/shop/cart
+kind-stg-eu/shop/checkout
+kind-stg-us/shop/cart
+kind-stg-us/shop/checkout
+```
+
 `get` exits 0 even when nothing matches, as kubectl does. For grep-style exit
 codes use `--find TEXT -k KIND`, which exits 1 when nothing matches.
 

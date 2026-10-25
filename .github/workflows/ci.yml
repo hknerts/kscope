@@ -108,3 +108,10 @@ jobs:
         run: |
           cargo run --locked -- get pods noisy -u kind | tee /tmp/get.txt
           grep -Eq '^kind-[^ ]+ +default +noisy ' /tmp/get.txt
+      - name: get -o json and -o name are machine-readable
+        run: |
+          cargo run --locked -- get pods noisy -u kind -o json | tee /tmp/get.json
+          jq -e 'length >= 1 and all(.[]; has("context") and has("namespace") and has("name") and has("status") and has("age_seconds"))' /tmp/get.json
+          jq -e 'any(.[]; .name == "noisy" and .namespace == "default" and (.context | startswith("kind-")))' /tmp/get.json
+          cargo run --locked -- get pods noisy -u kind -o name | tee /tmp/get.names
+          grep -Eq '^kind-[^/]+/default/noisy$' /tmp/get.names

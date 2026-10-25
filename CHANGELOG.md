@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`kscope get -o json` and `-o name`.** `-o json` prints a JSON array of
+  `{context, namespace, name, status, age_seconds}` for `jq` and scripts,
+  across a fleet as well (`kscope get pods -u stg -o json | jq`). `-o name`
+  prints `context/namespace/name`, one per line. The table stays the default.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added

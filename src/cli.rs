@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// A fast, read-only Kubernetes TUI for logs and live metrics.
 #[derive(Debug, Parser)]
@@ -100,7 +100,24 @@ pub enum Command {
         kind: String,
         /// Only objects whose name or namespace contains this.
         name: Option<String>,
+        /// Output format: the table (default), `json` (an array of
+        /// `{context, namespace, name, status, age_seconds}`) or `name`
+        /// (`context/namespace/name`, one per line).
+        #[arg(short, long, value_enum, default_value_t = Output::Table)]
+        output: Output,
     },
+}
+
+/// How `get` prints what it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Output {
+    /// Aligned columns, like `kubectl get`.
+    #[default]
+    Table,
+    /// A JSON array, one object per row, for `jq` and scripts.
+    Json,
+    /// `context/namespace/name`, one per line.
+    Name,
 }
 
 impl Cli {
@@ -108,12 +125,21 @@ impl Cli {
     /// when nothing matches)`. `get` behaves like kubectl and exits 0 on an
     /// empty result; `--find` behaves like grep.
     pub fn search(&self) -> Option<(String, String, bool)> {
-        if let Some(Command::Get { kind, name }) = &self.command {
+        if let Some(Command::Get { kind, name, .. }) = &self.command {
             return Some((kind.clone(), name.clone().unwrap_or_default(), false));
         }
         let text = self.find.clone()?;
         let kind = self.kind.clone().unwrap_or_else(|| "pods".to_string());
         Some((kind, text, true))
+    }
+
+    /// How to print the search result. Only `get` takes `-o`; `--find`
+    /// always prints the table.
+    pub fn output(&self) -> Output {
+        match &self.command {
+            Some(Command::Get { output, .. }) => *output,
+            None => Output::Table,
+        }
     }
 
     /// Split a `--dump pod:container` argument.
@@ -165,6 +191,41 @@ mod tests {
         );
         assert_eq!(cli.namespace.as_deref(), Some("shop"));
         assert_eq!(Cli::parse_from(["kscope"]).search(), None);
+    }
+
+    #[test]
+    fn parses_get_output_formats() {
+        assert_eq!(
+            Cli::parse_from(["kscope", "get", "pods", "-u", "stg"]).output(),
+            Output::Table
+        );
+        for (argv, want) in [
+            (
+                &["kscope", "get", "pods", "-u", "stg", "-o", "json"][..],
+                Output::Json,
+            ),
+            (
+                &["kscope", "get", "pods", "--output", "name"][..],
+                Output::Name,
+            ),
+            (
+                &["kscope", "get", "deploy", "api", "-o", "name", "-u", "prod"][..],
+                Output::Name,
+            ),
+            (
+                &["kscope", "-u", "stg", "get", "pods", "-o", "table"][..],
+                Output::Table,
+            ),
+        ] {
+            let cli = Cli::parse_from(argv);
+            assert_eq!(cli.output(), want, "{argv:?}");
+            assert!(cli.search().is_some());
+        }
+        assert!(Cli::try_parse_from(["kscope", "get", "pods", "-o", "yaml"]).is_err());
+        assert_eq!(
+            Cli::parse_from(["kscope", "--find", "api"]).output(),
+            Output::Table
+        );
     }
 
     #[test]

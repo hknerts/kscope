@@ -167,6 +167,25 @@ impl ResourceRow {
         }
     }
 
+    /// `context/namespace/name`, as `kscope get -o name` prints it. The
+    /// namespace segment stays (empty) for cluster-scoped objects, so the
+    /// name is always the third `/`-separated field.
+    pub fn qualified_name(&self) -> String {
+        format!("{}/{}/{}", self.context, self.namespace, self.name)
+    }
+
+    /// The row as `kscope get -o json` prints it. A stable, small shape for
+    /// scripts; the table's derived columns (usage, images) are left out.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "context": self.context,
+            "namespace": self.namespace,
+            "name": self.name,
+            "status": self.status,
+            "age_seconds": self.age_seconds,
+        })
+    }
+
     /// Unique across a fleet: the same `namespace/name` can exist in every
     /// member, and keeping the selection must not jump between them.
     pub fn identity(&self) -> String {
@@ -489,6 +508,37 @@ pub fn contexts() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_print_as_json_and_qualified_names() {
+        let pod = ResourceRow {
+            context: "stg-eu".into(),
+            namespace: "shop".into(),
+            name: "api-0".into(),
+            status: "Running".into(),
+            age_seconds: 90,
+            images: vec!["busybox:1.36".into()],
+            ..Default::default()
+        };
+        assert_eq!(pod.qualified_name(), "stg-eu/shop/api-0");
+        assert_eq!(
+            pod.to_json(),
+            serde_json::json!({
+                "context": "stg-eu",
+                "namespace": "shop",
+                "name": "api-0",
+                "status": "Running",
+                "age_seconds": 90,
+            })
+        );
+        let node = ResourceRow {
+            context: "stg-eu".into(),
+            name: "worker".into(),
+            ..Default::default()
+        };
+        assert_eq!(node.qualified_name(), "stg-eu//worker");
+        assert_eq!(node.to_json()["namespace"], "");
+    }
 
     #[test]
     fn usage_is_a_pods_own_or_the_sum_of_what_a_workload_selects() {
