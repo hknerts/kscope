@@ -217,7 +217,9 @@ impl Theme {
 
 fn parse_hex(s: &str) -> Option<Color> {
     let s = s.strip_prefix('#')?;
-    if s.len() != 6 {
+    // Checked byte by byte first: slicing a non-ASCII string at 2 and 4 would
+    // panic, and `from_str_radix` alone accepts a leading `+`.
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -391,6 +393,19 @@ mod tests {
         assert_eq!(c.fleets["edge"], vec!["edge-*"]);
         assert!(!c.fleets.contains_key("prod"));
         assert_eq!(c.fleets.len(), 3);
+    }
+
+    #[test]
+    fn a_malformed_hex_colour_falls_back_instead_of_panicking() {
+        // Six bytes, but "é" straddles the first two-byte slice: slicing the
+        // string there used to panic on start-up with a bad theme.
+        assert_eq!(Theme::color("#aéabc"), Color::Reset);
+        // from_str_radix accepts a sign; a colour must not.
+        assert_eq!(Theme::color("#+f+f+f"), Color::Reset);
+        assert_eq!(Theme::color("#12345"), Color::Reset);
+        assert_eq!(Theme::color("#1234567"), Color::Reset);
+        assert_eq!(Theme::color("#gg0000"), Color::Reset);
+        assert_eq!(Theme::color("ff8800"), Color::Reset);
     }
 
     #[test]
