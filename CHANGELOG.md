@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`:fleet <name>` switches fleet from anywhere**, the list or any tab, with
+  the rules of `-u`: a fleet name, a plain word (every context containing
+  it) or globs. `:u` is short for it, the completions after `:fleet ` are
+  the configured fleets, and `:fleet` alone leaves the fleet.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added
