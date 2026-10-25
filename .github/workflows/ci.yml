@@ -133,3 +133,36 @@ jobs:
           cargo run --locked -- get pods noisy -u kind | tee /tmp/get.txt
           grep -Eq '^kind-[^ ]+ +default +noisy ' /tmp/get.txt
 
+  coverage:
+    name: coverage (report as an artifact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # No upload service and no token: an lcov file and an HTML report to
+      # download from the run, plus the summary table on the run page.
+      - name: Measure
+        run: |
+          cargo llvm-cov --all-features --locked --no-report
+          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --html --output-dir coverage
+          {
+            echo '### Line coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage/
+          retention-days: 14
