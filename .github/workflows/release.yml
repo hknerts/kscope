@@ -6,9 +6,10 @@ on:
     tags: ["v*", "[0-9]*"]
   workflow_dispatch:
 
+# Read-only by default; each job asks for exactly what it writes, so the
+# binary builds cannot push images and the image build cannot edit releases.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   # One job writes the release page, from the CHANGELOG section for this tag.
@@ -16,6 +17,8 @@ jobs:
   # page ended up as five copies of a bare "Full Changelog" link.
   notes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release page
     steps:
       - uses: actions/checkout@v7
       - name: Extract this version's changelog
@@ -51,6 +54,8 @@ jobs:
     name: build ${{ matrix.target }}
     needs: notes
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # attach archives to the release
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +101,9 @@ jobs:
 
   container:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
