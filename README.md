@@ -155,6 +155,26 @@ cargo install --locked --git https://github.com/hknerts/kscope
 docker run --rm -it -v ~/.kube:/home/nonroot/.kube:ro ghcr.io/hknerts/kscope:latest
 ```
 
+### Nix
+
+```sh
+nix run github:hknerts/kscope          # try it
+nix profile install github:hknerts/kscope
+nix develop                            # in a checkout: Rust, clippy, kind, kubectl
+```
+
+### Homebrew, krew and Scoop
+
+The formula and manifests live in [`packaging/`](packaging/), and every
+release attaches them with its checksums filled in. Once they are published
+([#31](https://github.com/hknerts/kscope/issues/31)), installing is:
+
+```sh
+brew install hknerts/tap/kscope                    # macOS, Linux
+kubectl krew install kscope && kubectl kscope      # as a kubectl plugin
+scoop bucket add hknerts https://github.com/hknerts/scoop-bucket && scoop install kscope   # Windows
+```
+
 ## Usage
 
 ```sh
