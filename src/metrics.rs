@@ -411,4 +411,165 @@ mod tests {
         assert_eq!(pod.usage.mem.last(), 1536.0);
         assert_eq!(pod.containers.len(), 2);
     }
+
+    #[test]
+    fn parses_every_cpu_suffix_metrics_server_emits() {
+        assert!((parse_cpu("500u") - 0.5).abs() < 1e-9);
+        assert_eq!(parse_cpu("2k"), 2_000_000.0);
+        assert_eq!(parse_cpu("  100m "), 100.0);
+        assert_eq!(parse_cpu("0"), 0.0);
+        // Garbage is zero, never a panic.
+        assert_eq!(parse_cpu("lots"), 0.0);
+        assert_eq!(parse_cpu("m"), 0.0);
+    }
+
+    #[test]
+    fn parses_every_memory_suffix() {
+        assert_eq!(parse_memory("1Gi"), 1024f64.powi(3));
+        assert_eq!(parse_memory("1Ti"), 1024f64.powi(4));
+        assert_eq!(parse_memory("1Pi"), 1024f64.powi(5));
+        assert_eq!(parse_memory("1Ei"), 1024f64.powi(6));
+        assert_eq!(parse_memory("1.5Mi"), 1.5 * 1024.0 * 1024.0);
+        assert_eq!(parse_memory("2k"), 2e3);
+        assert_eq!(parse_memory("2K"), 2e3);
+        assert_eq!(parse_memory("3M"), 3e6);
+        assert_eq!(parse_memory("1T"), 1e12);
+        assert_eq!(parse_memory("1P"), 1e15);
+        // Kubernetes does print millibytes for odd requests.
+        assert_eq!(parse_memory("1500m"), 1.5);
+        assert_eq!(parse_memory(" 64Mi "), 64.0 * 1024.0 * 1024.0);
+        assert_eq!(parse_memory(""), 0.0);
+        assert_eq!(parse_memory("Mi"), 0.0);
+    }
+
+    #[test]
+    fn formats_bytes_at_unit_boundaries() {
+        assert_eq!(fmt_bytes(0.0), "0B");
+        assert_eq!(fmt_bytes(1023.0), "1023B");
+        assert_eq!(fmt_bytes(1024.0), "1.0Ki");
+        assert_eq!(fmt_bytes(1024f64.powi(3) * 2.0), "2.0Gi");
+        // Past the largest unit the number grows instead of the unit.
+        assert_eq!(fmt_bytes(1024f64.powi(6)), "1024.0Pi");
+    }
+
+    #[test]
+    fn formats_cpu_as_millicores_below_a_core() {
+        assert_eq!(fmt_cpu(0.0), "0m");
+        assert_eq!(fmt_cpu(999.0), "999m");
+        assert_eq!(fmt_cpu(1000.0), "1.00");
+        assert_eq!(fmt_cpu(12_340.0), "12.34");
+    }
+
+    #[test]
+    fn percentages_of_nothing_are_zero() {
+        assert_eq!(pct(50.0, 200.0), 25.0);
+        assert_eq!(pct(50.0, 0.0), 0.0);
+        assert_eq!(pct(50.0, -1.0), 0.0);
+        // Over the limit is reported as such; the gauge clamps, not this.
+        assert_eq!(pct(300.0, 200.0), 150.0);
+    }
+
+    #[test]
+    fn an_empty_series_reads_as_zero() {
+        let s = Series::new(16);
+        assert!(s.is_empty());
+        assert_eq!(s.last(), 0.0);
+        assert_eq!(s.max(), 0.0);
+        assert_eq!(s.avg(), 0.0);
+        assert!(s.sparkline(10, 100.0).is_empty());
+    }
+
+    #[test]
+    fn series_capacity_has_a_floor() {
+        let mut s = Series::new(0);
+        for i in 0..20 {
+            s.push(i as f64);
+        }
+        assert_eq!(s.sparkline(100, 1.0).len(), 8);
+        assert_eq!(s.avg(), (12..20).sum::<i32>() as f64 / 8.0);
+    }
+
+    #[test]
+    fn sparkline_takes_the_newest_samples_and_clamps_them() {
+        let mut s = Series::new(16);
+        for v in [10.0, 50.0, 100.0, 250.0, -5.0] {
+            s.push(v);
+        }
+        assert_eq!(s.sparkline(3, 100.0), vec![100, 100, 0]);
+        assert_eq!(s.sparkline(10, 200.0), vec![5, 25, 50, 100, 0]);
+        // A zero scale (no limit set) draws a flat line, not NaN.
+        assert_eq!(s.sparkline(2, 0.0), vec![0, 0]);
+    }
+
+    #[test]
+    fn repeated_pod_samples_extend_the_same_containers() {
+        let mut store = MetricsStore::new(16);
+        store.record_pod("ns", "p", &[("app".to_string(), 10.0, 100.0)]);
+        store.pods.get_mut("ns/p").unwrap().stale = true;
+        store.record_pod(
+            "ns",
+            "p",
+            &[
+                ("app".to_string(), 30.0, 300.0),
+                ("late".to_string(), 5.0, 50.0),
+            ],
+        );
+        let pod = &store.pods["ns/p"];
+        assert!(!pod.stale, "a fresh sample clears the stale flag");
+        assert_eq!(pod.containers.len(), 2);
+        assert_eq!(pod.containers[0].usage.cpu.max(), 30.0);
+        assert_eq!(pod.containers[0].usage.cpu.avg(), 20.0);
+        assert_eq!(pod.usage.cpu.last(), 35.0);
+        assert_eq!(pod.key(), "ns/p");
+    }
+
+    #[test]
+    fn retain_drops_pods_that_are_gone() {
+        let mut store = MetricsStore::new(16);
+        store.record_pod("ns", "a", &[]);
+        store.record_pod("ns", "b", &[]);
+        let keep: std::collections::HashSet<String> = ["ns/b".to_string()].into();
+        store.retain_pods(&keep);
+        assert_eq!(store.pods.keys().collect::<Vec<_>>(), vec!["ns/b"]);
+    }
+
+    #[test]
+    fn cluster_totals_sum_the_newest_node_samples() {
+        let mut store = MetricsStore::new(16);
+        store.record_node("n1", 100.0, 1e9);
+        store.record_node("n1", 200.0, 2e9);
+        store.record_node("n2", 50.0, 1e9);
+        store.nodes.get_mut("n1").unwrap().cpu_allocatable = 1000.0;
+        store.nodes.get_mut("n2").unwrap().cpu_allocatable = 1000.0;
+        store.nodes.get_mut("n1").unwrap().mem_allocatable = 4e9;
+        let (cpu, cpu_cap, mem, mem_cap) = store.cluster_totals();
+        assert_eq!((cpu, cpu_cap, mem, mem_cap), (250.0, 2000.0, 3e9, 4e9));
+        assert_eq!(store.nodes["n1"].cpu_pct(), 20.0);
+        assert_eq!(
+            store.nodes["n2"].mem_pct(),
+            0.0,
+            "no allocatable, no percent"
+        );
+    }
+
+    #[test]
+    fn container_and_pod_summaries() {
+        let mut store = MetricsStore::new(8);
+        store.record_pod(
+            "ns",
+            "p",
+            &[("a".to_string(), 50.0, 512.0), ("b".to_string(), 0.0, 0.0)],
+        );
+        let pod = store.pods.get_mut("ns/p").unwrap();
+        pod.containers[0].ready = true;
+        pod.containers[0].restarts = 2;
+        pod.containers[1].restarts = 1;
+        pod.containers[0].cpu_limit = 200.0;
+        pod.containers[0].mem_limit = 1024.0;
+        assert_eq!(pod.ready_string(), "1/2");
+        assert_eq!(pod.restarts(), 3);
+        assert_eq!(pod.containers[0].cpu_pct(), 25.0);
+        assert_eq!(pod.containers[0].mem_pct(), 50.0);
+        assert_eq!(pod.containers[1].cpu_pct(), 0.0);
+    }
 }
