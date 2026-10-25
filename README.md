@@ -190,6 +190,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `Ctrl-b` / `Ctrl-f` | full page up / down |
 | `g` / `G` | top / bottom (bottom re-enables follow) |
 | `Ctrl-n` | change the namespace scope |
+| `M` | toggle mouse capture: off lets the terminal select and copy text, on scrolls with the wheel |
 
 ### In the `:` palette
 

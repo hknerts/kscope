@@ -215,6 +215,13 @@ pub struct App {
     /// Set when the namespace scope changes: the pollers are bound to a scope
     /// at spawn time, so they have to be restarted to follow it.
     pub pollers_stale: bool,
+    /// Whether the terminal captures the mouse (wheel scrolling). Off, the
+    /// terminal selects text instead, so a log line can be copied out.
+    /// Starts from `general.mouse`; `M` flips it.
+    pub mouse_capture: bool,
+    /// Set when `mouse_capture` changes: the main loop owns the terminal and
+    /// applies it there.
+    pub mouse_stale: bool,
 
     // ------------------------------------------------------------ resources
     /// Every listable kind the cluster serves, from its discovery API.
@@ -351,6 +358,7 @@ impl App {
         contexts: Vec<ContextEntry>,
     ) -> Self {
         let highlighter = Highlighter::new(&config.theme, &config.highlight);
+        let mouse_capture = config.general.mouse;
         let buffer = LogBuffer::new(config.logs.buffer_lines);
         let metrics = MetricsStore::new(config.metrics.history);
         let names: Vec<String> = contexts.iter().map(|c| c.name.clone()).collect();
@@ -380,6 +388,8 @@ impl App {
             pending_open: None,
             start_kind: None,
             pollers_stale: false,
+            mouse_capture,
+            mouse_stale: false,
             resource_types: Vec::new(),
             current_type: None,
             rows: Vec::new(),
@@ -1803,7 +1813,7 @@ impl App {
         match event {
             Event::Key(key) => self.on_key(key),
             Event::Resize(_, _) => self.dirty = true,
-            Event::Mouse(m) if self.config.general.mouse => match m.kind {
+            Event::Mouse(m) if self.mouse_capture => match m.kind {
                 MouseEventKind::ScrollUp => self.scroll_by(-3),
                 MouseEventKind::ScrollDown => self.scroll_by(3),
                 _ => {}
@@ -2035,6 +2045,8 @@ impl App {
                 );
             }
 
+            KeyCode::Char('M') => self.toggle_mouse_capture(),
+
             KeyCode::Char('S') => {
                 self.sort_by = self.sort_by.next();
                 let label = self.sort_by.label();
@@ -2043,6 +2055,21 @@ impl App {
 
             _ => {}
         }
+    }
+
+    /// `M`: hand the mouse to the terminal so text can be selected and
+    /// copied, or take it back for wheel scrolling.
+    fn toggle_mouse_capture(&mut self) {
+        self.mouse_capture = !self.mouse_capture;
+        self.mouse_stale = true;
+        self.set_status(
+            if self.mouse_capture {
+                "mouse on — the wheel scrolls; M to select text"
+            } else {
+                "mouse off — select text with the mouse; M to scroll again"
+            },
+            StatusKind::Info,
+        );
     }
 
     /// `Esc` steps back out: any tab, describe included → browse → quit.
@@ -2962,6 +2989,43 @@ pub(crate) mod tests {
         // The pod inventory has not arrived yet: that is not "no pods".
         app.set_view(View::Logs);
         assert_eq!(app.status.text, "waiting for the pod inventory…");
+    }
+
+    #[tokio::test]
+    async fn m_hands_the_mouse_to_the_terminal_and_back() {
+        let mut app = test_app(Config::default());
+        let m = |app: &mut App| app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('M'))));
+        let scroll_down = |app: &mut App| {
+            app.on_event(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        assert!(app.mouse_capture && !app.mouse_stale);
+
+        m(&mut app);
+        assert!(!app.mouse_capture);
+        assert!(std::mem::take(&mut app.mouse_stale));
+        assert!(app.status.text.starts_with("mouse off"));
+        // A stray wheel event while released does nothing.
+        app.dirty = false;
+        scroll_down(&mut app);
+        assert!(!app.dirty);
+
+        m(&mut app);
+        assert!(app.mouse_capture);
+        assert!(std::mem::take(&mut app.mouse_stale));
+        assert!(app.status.text.starts_with("mouse on"));
+
+        // `general.mouse = false` is only the starting state.
+        let mut config = Config::default();
+        config.general.mouse = false;
+        let mut app = test_app(config);
+        assert!(!app.mouse_capture);
+        m(&mut app);
+        assert!(app.mouse_capture && app.mouse_stale);
     }
 
     #[tokio::test]

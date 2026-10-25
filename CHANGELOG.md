@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`M` toggles mouse capture at runtime** (#25). Off, the terminal selects
+  text again, so a log line or an error can be copied out; on, the wheel
+  scrolls. The status bar says `mouse off: select text` while it is off.
+  `general.mouse` is still the starting state, and the terminal is restored
+  correctly whichever mode kscope quits in.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added

@@ -653,6 +653,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             }
         },
     }
+    // Only said when off: it explains why the wheel no longer scrolls.
+    if !app.mouse_capture {
+        fact(
+            "mouse off: select text".to_string(),
+            Style::default().fg(theme.warn()),
+        );
+    }
     fact("? help".to_string(), dim);
     facts.push(Span::raw(" "));
 
@@ -840,6 +847,19 @@ mod render_tests {
         assert!(
             !status.contains("drop:") && !status.contains("filter"),
             "{status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_status_bar_says_when_the_mouse_is_released() {
+        let mut app = test_app(Config::default());
+        let status = |app: &mut App| render(app, 160, 30)[29].clone();
+        assert!(!status(&mut app).contains("mouse off"));
+        app.mouse_capture = false;
+        let line = status(&mut app);
+        assert!(
+            line.trim_end().ends_with("mouse off: select text · ? help"),
+            "{line}"
         );
     }
 

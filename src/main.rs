@@ -280,6 +280,8 @@ fn setup_terminal(mouse: bool) -> Result<Tui> {
 
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode()?;
+    // Disabling capture is harmless when `M` already released it, so this
+    // leaves the terminal clean whichever mode kscope quit in.
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
@@ -573,6 +575,15 @@ async fn run(
                 met_tx.clone(),
                 evt_tx.clone(),
             );
+        }
+
+        // `M` released or re-took the mouse; only the loop owns the terminal.
+        if std::mem::take(&mut app.mouse_stale) {
+            if app.mouse_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
         }
 
         if app.fleet.is_some() && last_member_pods.elapsed() >= fleet_refresh {
