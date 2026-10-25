@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Sort the list (`S`).** `S` in the list cycles name → age (newest
+  first) → status (problems first) and, for pods, → restarts (most first).
+  The order is named in the list title (`pods · all · by age`), and the
+  selection stays on the same object when the order changes.
+
 ### Fixed
 
 - Two log lines with the same timestamp are both shown; the second used to

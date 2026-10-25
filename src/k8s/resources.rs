@@ -142,6 +142,9 @@ pub struct ResourceRow {
     /// True when `status` reads as a problem, so the table can colour it and
     /// the "problems only" filter can pick it out.
     pub unhealthy: bool,
+    /// Container restarts summed over a pod's containers; 0 for every other
+    /// kind. Lets the list put the restart-happy pods at the top.
+    pub restarts: i64,
     /// The object's own pod selector, when it has one. Lets a Service (or a
     /// CRD shaped like one) resolve to the pods whose logs it fronts.
     pub selector: std::collections::BTreeMap<String, String>,
@@ -311,6 +314,7 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
         age_seconds,
         status,
         unhealthy,
+        restarts: restart_count(&obj.data),
         selector: pod_selector(&obj.data),
         images: container_images(&obj.data),
         usage: None,
@@ -376,6 +380,17 @@ fn pod_selector(data: &serde_json::Value) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A pod's container restarts, summed. Init containers are left out, as
+/// `kubectl get pods` leaves them out of its RESTARTS column.
+fn restart_count(data: &serde_json::Value) -> i64 {
+    data["status"]["containerStatuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["restartCount"].as_i64())
+        .sum()
 }
 
 /// A one-word health summary from whatever shape the object happens to have.
@@ -659,6 +674,17 @@ mod tests {
             "Running",
         );
         assert_eq!(summarise(&obj), ("CrashLoopBackOff".to_string(), true));
+        assert_eq!(restart_count(&obj), 7);
+    }
+
+    #[test]
+    fn restarts_are_summed_over_containers_and_zero_without_any() {
+        let obj = pod(
+            json!([{"restartCount": 2}, {"restartCount": 5}, {"ready": true}]),
+            "Running",
+        );
+        assert_eq!(restart_count(&obj), 7);
+        assert_eq!(restart_count(&json!({"status": {"replicas": 3}})), 0);
     }
 
     #[test]
