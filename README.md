@@ -159,13 +159,13 @@ docker run --rm -it -v ~/.kube:/home/nonroot/.kube:ro ghcr.io/hknerts/kscope:lat
 
 ```sh
 kscope                        # current context, current namespace
-                              # (full log history from container start, nothing evicted)
+                              # (log history from container start, last 50k lines kept)
 kscope -n payments            # a specific namespace
 kscope -A                     # every namespace you can read
 kscope --context staging      # start on a specific kubeconfig context
 kscope -l app=api,tier!=batch # only objects matching a label selector
 kscope --tail 2000            # only the last 2000 log lines instead of everything
-kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
+kscope --buffer 200000        # keep 200k lines instead of 50k (0 = unlimited)
 kscope --since 3600           # only lines from the last hour
 kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 kscope -u stg                 # every context with "stg" in its name, as one list
@@ -398,16 +398,19 @@ Every member uses the credentials of its own kubeconfig context, and the
 
 ## How far back can I scroll?
 
-By default, **all the way to the container's first line**. There are no limits
-on kscope's side:
+By default, **the last 50 000 lines**, filled from the container's first line:
 
 * On attach, kscope asks the API server for the container's entire retained
   history (`tail_lines` unset), not a fixed tail.
-* The in-memory buffer is **unbounded** by default (`logs.buffer_lines = 0`), so
-  nothing is evicted for the lifetime of the session. `g` jumps to the first
-  line, always.
-* The status bar shows the live line count, so an unbounded session cannot grow
-  silently.
+* The in-memory buffer is a **ring of 50 000 lines** by default
+  (`logs.buffer_lines`), about 12 MiB at a typical 200-byte line, so a noisy
+  pod or a fleet-wide merge cannot grow memory without limit. Once it is full
+  the oldest lines are evicted, and the log pane says how many
+  (`buffer 50000/50000 · 1200 evicted, oldest first`).
+* `logs.buffer_lines = 0` (or `--buffer 0`) makes it **unbounded**: nothing is
+  evicted for the lifetime of the session, and `g` always jumps to the first
+  line. The log pane then shows the live line count and resident size, so the
+  session cannot grow silently.
 
 Two limits are outside kscope's control, and it is worth knowing them:
 
@@ -423,11 +426,12 @@ Events have a third: the API server **expires them after about an hour**
 (`--event-ttl`). An empty events tab usually means "nothing has happened
 recently", not that something is broken.
 
-If you would rather trade history for a memory ceiling, set a cap:
+To keep more history, raise the cap or remove it; to fetch less, narrow the
+tail:
 
 ```toml
 [logs]
-buffer_lines = 200000   # ring buffer; oldest lines are evicted
+buffer_lines = 200000   # a bigger ring; 0 = unlimited, never evict
 tail_lines = 5000       # only fetch the last 5000 lines on attach
 ```
 
@@ -458,7 +462,7 @@ allow_reveal = true          # v shows a Secret's values decoded; false forbids 
 qa = ["qa-*"]                # are built in, KSCOPE_FLEET_<NAME> overrides
 
 [logs]
-buffer_lines = 0     # 0 = unlimited (default): never evict
+buffer_lines = 50000 # ring buffer (default); 0 = unlimited, never evict
 tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
 max_streams = 50     # cap on concurrent container log streams
@@ -533,8 +537,8 @@ The design targets pods that emit tens of thousands of lines per second:
 * Log lines arrive in **batches** (512 lines or 100 ms) so a chatty container
   cannot livelock the render loop.
 * Lines are classified into a severity level exactly once, on arrival, and
-  stored in an unbounded deque — or a fixed-capacity ring buffer if you set
-  `logs.buffer_lines`.
+  stored in a fixed-capacity ring buffer (`logs.buffer_lines`, 50 000 by
+  default), or an unbounded deque with `buffer_lines = 0`.
 * The filtered view is a list of line ids maintained **incrementally**; only a
   filter change costs a full pass.
 * Redraws are capped at `general.max_fps` (30 by default) and only happen when

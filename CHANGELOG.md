@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The log buffer is bounded by default.** `logs.buffer_lines` now defaults
+  to 50 000 lines (about 12 MiB at a typical 200-byte line) instead of
+  unlimited, so a noisy pod or a fleet-wide merge cannot grow memory without
+  limit. The log pane says how many lines were evicted
+  (`buffer 50000/50000 · 1200 evicted, oldest first`). To keep every line as
+  before, set `buffer_lines = 0` or pass `--buffer 0`; an explicit value in an
+  existing config is honoured as it was.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added

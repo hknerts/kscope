@@ -217,6 +217,14 @@ fn draw_summary(f: &mut Frame, app: &App, area: Rect) {
     ));
     spans.push(Span::styled(
         match app.buffer.capacity() {
+            // Evicted lines are said here, not only in the status bar: they
+            // are why `g` no longer reaches the container's first line.
+            Some(cap) if app.buffer.dropped > 0 => format!(
+                "  buffer {}/{} · {} evicted, oldest first",
+                app.buffer.len(),
+                cap,
+                app.buffer.dropped
+            ),
             Some(cap) => format!("  buffer {}/{}", app.buffer.len(), cap),
             None => format!(
                 "  buffer {} lines · {:.1} MiB · unlimited",

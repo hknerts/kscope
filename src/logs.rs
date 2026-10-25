@@ -2,10 +2,11 @@
 //!
 //! Design notes (this is the hot path, so it is worth stating explicitly):
 //!
-//! * Lines live in a [`VecDeque`]. By default it is **unbounded**, so a session
-//!   holds every line the container ever emitted; setting `logs.buffer_lines`
-//!   turns it into a fixed-capacity ring buffer that evicts the oldest lines.
-//!   Pushing is O(1) either way.
+//! * Lines live in a [`VecDeque`] used as a fixed-capacity ring buffer that
+//!   evicts the oldest lines (`logs.buffer_lines`, 50 000 by default), so a
+//!   noisy pod or a fleet-wide merge cannot grow memory without limit.
+//!   `buffer_lines = 0` makes it **unbounded**: the session then holds every
+//!   line the container ever emitted. Pushing is O(1) either way.
 //! * Every line is classified **once**, on arrival, into a [`Level`]. Filtering
 //!   and colouring then only look at a `u8`-sized enum instead of re-scanning
 //!   text on every frame.
@@ -389,11 +390,13 @@ impl LogBuffer {
     }
 
     pub fn clear(&mut self) {
+        // Retire the retained lines' ids. (`received - dropped` is not their
+        // count once an earlier clear has reset `dropped`.)
+        self.base += self.lines.len() as u64;
         self.lines.clear();
         self.view.clear();
         self.counts = [0; 6];
         self.bytes = 0;
-        self.base += self.received - self.dropped;
         self.dropped = 0;
     }
 
@@ -681,6 +684,46 @@ mod tests {
         assert_eq!(buf.memory_bytes(), size(64));
         buf.clear();
         assert_eq!(buf.memory_bytes(), 0);
+    }
+
+    #[test]
+    fn ids_stay_dense_across_repeated_clears() {
+        let mut buf = LogBuffer::new(64);
+        for round in 0..3 {
+            for i in 0..100 {
+                buf.push(line(&format!("r{round} line {i}")));
+            }
+            buf.clear();
+            assert_eq!(buf.dropped, 0, "a clear restarts the evicted count");
+        }
+        // 300 lines received, all retired: the next one is id 300.
+        assert_eq!(buf.base, 300);
+        buf.push(line("after"));
+        assert_eq!(&*buf.view_line(0).unwrap().raw, "after");
+    }
+
+    #[test]
+    fn scanning_never_reads_past_either_end() {
+        // A needle as long as, or longer than, the haystack.
+        assert_eq!(find_ci(b"err", b"ERR"), Some(0));
+        assert_eq!(find_ci(b"er", b"err"), None);
+        assert_eq!(find_ci(b"", b"e"), None);
+        assert_eq!(find_ci(b"abc", b""), None);
+        // A match flush with the last byte, and a token at either edge.
+        assert_eq!(find_ci(b"xxERROR", b"error"), Some(2));
+        assert!(has_token(b"error", b"error"));
+        assert!(!has_token(b"errors", b"error"));
+        assert!(!has_token(b"e", b"error"));
+
+        // Timestamps: too short, no space within reach, multi-byte after.
+        assert_eq!(timestamp_len("2024-01-01T00:00:00Z"), 0);
+        assert_eq!(timestamp_len("2024-01-01T00:00:00Z!"), 0);
+        assert_eq!(timestamp_len(&format!("2024-01-01T{}", "0".repeat(80))), 0);
+        let l = line("2024-01-01T00:00:00.123456789Z ünïcode body");
+        assert_eq!(l.timestamp(), Some("2024-01-01T00:00:00.123456789Z"));
+        assert_eq!(l.body(), "ünïcode body");
+        // Classification only looks at the head, even of a huge line.
+        assert_eq!(classify(&format!("{} ERROR", "x".repeat(600))), Level::Info);
     }
 
     #[test]

@@ -844,6 +844,39 @@ mod render_tests {
     }
 
     #[tokio::test]
+    async fn the_log_pane_says_how_many_lines_were_evicted() {
+        use crate::app::{RightMode, View};
+        use crate::logs::LogLine;
+        use std::sync::Arc;
+
+        let mut config = Config::default();
+        config.logs.buffer_lines = 64; // the smallest ring
+        let mut app = test_app(config);
+        app.right = RightMode::Detail;
+        app.view = View::Logs;
+        let source: Arc<str> = Arc::from("shop/api:app");
+        for i in 0..64 {
+            app.buffer
+                .push(LogLine::new(format!("INFO {i}"), source.clone()));
+        }
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(screen.contains("buffer 64/64"), "{screen}");
+        assert!(!screen.contains("evicted"), "{screen}");
+
+        for i in 64..74 {
+            app.buffer
+                .push(LogLine::new(format!("INFO {i}"), source.clone()));
+        }
+        let screen = render(&mut app, 160, 30);
+        let all = screen.join("\n");
+        assert!(
+            all.contains("buffer 64/64 · 10 evicted, oldest first"),
+            "{all}"
+        );
+        assert!(screen[29].contains("10 evicted"), "{}", screen[29]);
+    }
+
+    #[tokio::test]
     async fn a_fleet_list_has_a_context_column_and_a_fleet_badge() {
         let mut app = test_app(Config::default());
         app.enter_fleet(Fleet {

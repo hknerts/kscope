@@ -62,8 +62,9 @@ pub struct Cli {
     #[arg(long, value_name = "N")]
     pub tail: Option<i64>,
 
-    /// Maximum lines held in memory. 0 (the default) means unlimited, so you
-    /// can always scroll back to the start of the session.
+    /// Maximum lines held in memory (50000 by default); the oldest are
+    /// evicted. 0 means unlimited, so you can always scroll back to the start
+    /// of the session.
     #[arg(long, value_name = "N")]
     pub buffer: Option<usize>,
 
