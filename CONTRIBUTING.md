@@ -36,6 +36,28 @@ installs metrics-server and seeds every cluster with deployments that log
 covers logs, metrics, triage (`!`) and fleets. It is idempotent: run it again to
 reset the workloads.
 
+### No cluster, or no kind
+
+* **No cluster at all:** `cargo test` (or `make check`) needs none. State,
+  key handling and rendering are all tested against a client that is never
+  called, so most changes can be written and proven without a cluster.
+* **minikube or k3d instead of kind:** any context works. For example
+  `minikube start --addons=metrics-server` then `cargo run`, or
+  `k3d cluster create dev` (k3s ships metrics-server) then `cargo run`. A
+  fleet only needs two contexts with a shared word in their names, e.g.
+  `minikube start -p stg-a` and `minikube start -p stg-b`, then
+  `cargo run -- -u stg`.
+* **Rust:** the toolchain comes from `rust-toolchain.toml` (stable, with
+  rustfmt and clippy), so a plain [rustup](https://rustup.rs) install is
+  enough. The minimum supported version is 1.89.
+
+### Recording the demo
+
+`make demo` builds a release binary and records `assets/demo.gif` from
+[`hack/demo.tape`](hack/demo.tape) with [VHS](https://github.com/charmbracelet/vhs),
+against the `make dev-up` clusters. Re-record it when a change alters what the
+tape shows.
+
 ## Where things live
 
 | Path | What it does |
