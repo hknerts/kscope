@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
-use crate::app::{App, Pane, RightMode};
+use crate::app::{App, Pane, RightMode, RowSort};
 use crate::config::Theme;
 use crate::k8s::fmt_age;
 use crate::k8s::resources::{fmt_usage, short_image};
@@ -19,6 +19,11 @@ pub fn draw(f: &mut Frame, app: &mut App, area: Rect) {
     let place = match &app.fleet {
         Some(fleet) => format!("{} · fleet {}", app.scope.label(), fleet.name),
         None => app.scope.label().to_string(),
+    };
+    // The default order goes unsaid; any other is named after the place.
+    let place = match app.row_sort {
+        RowSort::Name => place,
+        sort => format!("{place} · by {}", sort.label()),
     };
     let title = match &app.row_filter {
         Some(filter) => format!(" {} /{filter}/ · {place} ", app.resource_label()),

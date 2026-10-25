@@ -149,6 +149,41 @@ impl SortBy {
     }
 }
 
+/// Sort order for the resource list. Rows arrive ordered by namespace and
+/// name (a fleet's by context first), so `Name` keeps that order and every
+/// other order is a stable sort on top of it: ties stay alphabetical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowSort {
+    #[default]
+    Name,
+    /// Newest first.
+    Age,
+    /// Problems first, then grouped by status text.
+    Status,
+    /// Most restarts first. Only offered for pods.
+    Restarts,
+}
+
+impl RowSort {
+    /// The order after this one; restarts are in the cycle only for pods.
+    pub fn next(self, pods: bool) -> Self {
+        match self {
+            RowSort::Name => RowSort::Age,
+            RowSort::Age => RowSort::Status,
+            RowSort::Status if pods => RowSort::Restarts,
+            RowSort::Status | RowSort::Restarts => RowSort::Name,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            RowSort::Name => "name",
+            RowSort::Age => "age",
+            RowSort::Status => "status",
+            RowSort::Restarts => "restarts",
+        }
+    }
+}
+
 /// Which metric table the content pane focuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricPane {
@@ -227,6 +262,8 @@ pub struct App {
     pub row_view: Vec<usize>,
     pub row_selected: usize,
     pub row_filter: Option<String>,
+    /// `S` while browsing: the order of `row_view`.
+    pub row_sort: RowSort,
     /// `-l`/`--selector`: narrows both the browsed list and the pods a
     /// workload's logs are collected from.
     pub selector: LabelSelector,
@@ -386,6 +423,7 @@ impl App {
             row_view: Vec::new(),
             row_selected: 0,
             row_filter: None,
+            row_sort: RowSort::default(),
             selector: LabelSelector::default(),
             selector_text: String::new(),
             problems_only: false,
@@ -553,7 +591,19 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
+        let rows = &self.rows;
+        match self.row_sort {
+            RowSort::Name => {}
+            RowSort::Age => self.row_view.sort_by_key(|&i| rows[i].age_seconds),
+            RowSort::Status => self
+                .row_view
+                .sort_by_key(|&i| (!rows[i].unhealthy, rows[i].status.as_str())),
+            RowSort::Restarts => self
+                .row_view
+                .sort_by_key(|&i| std::cmp::Reverse(rows[i].restarts)),
+        }
 
+        // The selection follows its object to wherever the order put it.
         self.row_selected = previous
             .and_then(|key| {
                 self.row_view
@@ -563,6 +613,21 @@ impl App {
             .unwrap_or(0);
         self.row_selected = self.row_selected.min(self.row_view.len().saturating_sub(1));
         self.rebuild_event_view();
+    }
+
+    /// `S` in the list: the next sort order, keeping the selected object.
+    fn cycle_row_sort(&mut self) {
+        let pods = self.current_type().is_some_and(|t| t.api.kind == "Pod");
+        self.row_sort = self.row_sort.next(pods);
+        self.rebuild_row_view();
+        self.set_status(
+            format!(
+                "sorting {} by {} — S for the next order",
+                self.resource_label(),
+                self.row_sort.label()
+            ),
+            StatusKind::Info,
+        );
     }
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &ResourceRow> {
@@ -645,6 +710,11 @@ impl App {
                 self.row_view.clear();
                 self.row_selected = 0;
                 self.row_filter = None;
+                // Restarts mean nothing for other kinds; any other order
+                // carries over.
+                if self.row_sort == RowSort::Restarts && kind.api.kind != "Pod" {
+                    self.row_sort = RowSort::Name;
+                }
                 self.rows_error = None;
                 self.right = RightMode::Browse;
                 self.pane = Pane::Resources;
@@ -2057,6 +2127,8 @@ impl App {
                 );
             }
 
+            // `S` sorts whatever is in front: the list, or a metric table.
+            KeyCode::Char('S') if self.right == RightMode::Browse => self.cycle_row_sort(),
             KeyCode::Char('S') => {
                 self.sort_by = self.sort_by.next();
                 let label = self.sort_by.label();
@@ -2624,6 +2696,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn row_sort_cycles_and_offers_restarts_only_for_pods() {
+        assert_eq!(RowSort::Name.next(true), RowSort::Age);
+        assert_eq!(RowSort::Age.next(true), RowSort::Status);
+        assert_eq!(RowSort::Status.next(true), RowSort::Restarts);
+        assert_eq!(RowSort::Restarts.next(true), RowSort::Name);
+        assert_eq!(RowSort::Status.next(false), RowSort::Name);
+    }
+
+    #[test]
     fn level_threshold_cycles_through_all() {
         let mut level = Level::Trace;
         for _ in 0..6 {
@@ -2788,6 +2869,65 @@ pub(crate) mod tests {
         // And the palette still picks resource types.
         palette(&mut app, "po");
         assert_eq!(app.palette.current(), Some("pods"));
+    }
+
+    #[tokio::test]
+    async fn sorting_the_list_keeps_the_selection_on_its_object() {
+        let mut app = test_app(Config::default());
+        let pod =
+            |name: &str, age: i64, status: &str, unhealthy: bool, restarts: i64| ResourceRow {
+                age_seconds: age,
+                status: status.into(),
+                unhealthy,
+                restarts,
+                ..row("", name)
+            };
+        app.on_listing(Ok(Listing {
+            rows: vec![
+                pod("api", 300, "Running ↺2", false, 2),
+                pod("cart", 60, "Running", false, 0),
+                pod("db", 900, "CrashLoopBackOff", true, 40),
+            ],
+            failed: vec![],
+        }));
+        let names =
+            |app: &App| -> Vec<String> { app.visible_rows().map(|r| r.name.clone()).collect() };
+        let sort = |app: &mut App| {
+            app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('S'))));
+        };
+        assert_eq!(names(&app), ["api", "cart", "db"]);
+        app.row_selected = 2; // db
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Age);
+        assert_eq!(names(&app), ["cart", "api", "db"]);
+        assert_eq!(app.selected_row().unwrap().name, "db");
+
+        // Problems first; the healthy keep name order between them.
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Status);
+        assert_eq!(names(&app), ["db", "cart", "api"]);
+        assert_eq!(app.selected_row().unwrap().name, "db");
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Restarts);
+        assert_eq!(names(&app), ["db", "api", "cart"]);
+        assert_eq!(app.row_selected, 0);
+
+        // A refresh keeps the order, and the filter applies on top of it.
+        app.row_filter = Some("a".into());
+        app.rebuild_row_view();
+        assert_eq!(names(&app), ["api", "cart"]);
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Name);
+
+        // In a detail tab `S` is still the metric tables' sort.
+        app.right = RightMode::Detail;
+        let metric_sort = app.sort_by;
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Name);
+        assert_eq!(app.sort_by, metric_sort.next());
     }
 
     #[tokio::test]

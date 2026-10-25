@@ -24,6 +24,10 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             ),
             ("/", "filter by name, namespace or cluster"),
             (
+                "S",
+                "sort: name, newest, problems first, most restarts (pods)",
+            ),
+            (
                 "!",
                 "only problems: crash loops, pending, not ready, failed",
             ),

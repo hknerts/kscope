@@ -8,10 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Sort the list (`S`).** `S` in the list cycles name → age (newest
+  first) → status (problems first) and, for pods, → restarts (most first).
+  The order is named in the list title (`pods · all · by age`), and the
+  selection stays on the same object when the order changes.
 - **`:fleet <name>` switches fleet from anywhere**, the list or any tab, with
   the rules of `-u`: a fleet name, a plain word (every context containing
   it) or globs. `:u` is short for it, the completions after `:fleet ` are
   the configured fleets, and `:fleet` alone leaves the fleet.
+
+### Fixed
+
+- Two log lines with the same timestamp are both shown; the second used to
+  be dropped as if a reconnect had replayed it.
+- A search hit is highlighted even on a word a built-in rule colours
+  (`ERROR`, a status code, part of a timestamp).
+- A malformed hex colour in the theme, such as `"#aéabc"`, falls back to
+  the terminal default instead of crashing kscope on start-up.
 
 ## [1.7.0] - 2026-10-21
 

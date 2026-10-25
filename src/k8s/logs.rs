@@ -118,6 +118,7 @@ pub fn spawn(
                     if tx.send(LogEvent::Attached(source.clone())).await.is_err() {
                         return;
                     }
+                    cursor.resume();
                     let before = cursor.delivered;
                     let outcome = pump(stream, &source, &tx, &mut cursor, spec.timestamps).await;
                     // Only a stream that actually delivered something earns a
@@ -166,9 +167,20 @@ struct Cursor {
     last: Option<Timestamp>,
     /// Lines delivered over the task's lifetime.
     delivered: u64,
+    /// How many of the delivered lines carry exactly `last`. Two lines can
+    /// share a stamp, so "at or before `last`" alone would drop the second.
+    at_last: u64,
+    /// Lines stamped `last` still to skip in a replay after a reconnect.
+    replay: u64,
 }
 
 impl Cursor {
+    /// A new stream is about to replay from `last` (`sinceTime` is inclusive):
+    /// the lines already delivered with that stamp come again and are skipped.
+    fn resume(&mut self) {
+        self.replay = self.at_last;
+    }
+
     /// Decide what to do with one raw, timestamp-prefixed line: `None` when it
     /// was already delivered before a reconnect, otherwise the text to show.
     fn accept(&mut self, raw: String, keep_timestamp: bool) -> Option<String> {
@@ -184,10 +196,21 @@ impl Cursor {
             },
         };
         if let Some(ts) = stamp {
-            if self.last.is_some_and(|last| ts <= last) {
-                return None;
+            match self.last {
+                Some(last) if ts < last => return None,
+                Some(last) if ts == last => {
+                    if self.replay > 0 {
+                        self.replay -= 1;
+                        return None;
+                    }
+                    self.at_last += 1;
+                }
+                _ => {
+                    self.last = Some(ts);
+                    self.at_last = 1;
+                    self.replay = 0;
+                }
             }
-            self.last = Some(ts);
         }
         self.delivered += 1;
         if keep_timestamp || body_at == 0 {
@@ -342,10 +365,30 @@ mod tests {
         assert_eq!(cursor.accept(a.clone(), false).as_deref(), Some("first"));
         assert_eq!(cursor.accept(b.clone(), false).as_deref(), Some("second"));
         // A reconnect with sinceTime replays from the start of that second.
+        cursor.resume();
         assert_eq!(cursor.accept(a, false), None);
         assert_eq!(cursor.accept(b, false), None);
         let c = "2024-05-01T10:00:01Z third".to_string();
         assert_eq!(cursor.accept(c.clone(), true), Some(c));
+        assert_eq!(cursor.delivered, 3);
+    }
+
+    #[test]
+    fn lines_that_share_a_timestamp_are_all_delivered() {
+        // Two lines can carry the same stamp (one write, a coarse clock).
+        // Within one stream both are new; only a replay may skip them.
+        let mut cursor = Cursor::default();
+        let a = "2024-05-01T10:00:00.100000000Z first".to_string();
+        let b = "2024-05-01T10:00:00.100000000Z second".to_string();
+        assert_eq!(cursor.accept(a.clone(), false).as_deref(), Some("first"));
+        assert_eq!(cursor.accept(b.clone(), false).as_deref(), Some("second"));
+        // A reconnect replays both, and then a third line with that stamp
+        // that was never seen.
+        cursor.resume();
+        assert_eq!(cursor.accept(a, false), None);
+        assert_eq!(cursor.accept(b, false), None);
+        let c = "2024-05-01T10:00:00.100000000Z third".to_string();
+        assert_eq!(cursor.accept(c, false).as_deref(), Some("third"));
         assert_eq!(cursor.delivered, 3);
     }
 

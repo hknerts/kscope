@@ -215,6 +215,7 @@ completions are the configured fleets. `:fleet` alone leaves the fleet.
 | `d` | describe it: a tab like `l` `m` `e`, which lead straight on from it |
 | `a` | in a fleet: the object on every cluster, drift flagged |
 | `/` | filter the list by name or namespace |
+| `S` | cycle sort: name → age (newest first) → status (problems first) → restarts (pods, most first) |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
 | `Ctrl-r` | re-list now |
