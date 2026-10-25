@@ -872,6 +872,26 @@ mod render_tests {
     }
 
     #[tokio::test]
+    async fn the_list_title_names_any_order_but_the_default() {
+        let mut app = test_app(Config::default());
+        app.on_listing(Ok(Listing {
+            rows: vec![ResourceRow {
+                namespace: "shop".into(),
+                name: "checkout-1".into(),
+                ..Default::default()
+            }],
+            failed: vec![],
+        }));
+        app.current_type = Some(0);
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(!screen.contains(" · by "), "{screen}");
+
+        app.row_sort = crate::app::RowSort::Age;
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(screen.contains("pods · default · by age"), "{screen}");
+    }
+
+    #[tokio::test]
     async fn fleets_sit_in_their_own_box_above_the_contexts() {
         let mut config = Config::default();
         config.fleets.insert("stg".into(), vec!["stg-*".into()]);
