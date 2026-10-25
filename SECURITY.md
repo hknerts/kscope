@@ -6,13 +6,14 @@ The latest minor release receives security fixes.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | ✅        |
+| 1.7.x   | ✅        |
+| < 1.7   | ❌        |
 
 ## Reporting a vulnerability
 
 Please **do not** open a public issue. Report privately through
 [GitHub Security Advisories](https://github.com/hknerts/kscope/security/advisories/new)
-or by emailing **security@kscope.dev**.
+("Report a vulnerability" on the Security tab).
 
 Expect an acknowledgement within 3 working days and an assessment within 10.
 We will credit you in the advisory unless you prefer otherwise.
