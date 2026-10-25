@@ -1,0 +1,40 @@
+# Homebrew formula for kscope, rendered by packaging/render.sh for each
+# release. Goes in the tap repository hknerts/homebrew-tap as Formula/kscope.rb:
+#
+#   brew install hknerts/tap/kscope
+class Kscope < Formula
+  desc "Fast, read-only Kubernetes TUI for logs, metrics and events across clusters"
+  homepage "https://github.com/hknerts/kscope"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/hknerts/kscope/releases/download/@VERSION@/kscope-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256_aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/hknerts/kscope/releases/download/@VERSION@/kscope-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256_x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/hknerts/kscope/releases/download/@VERSION@/kscope-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256_aarch64-unknown-linux-gnu@"
+    end
+    on_intel do
+      url "https://github.com/hknerts/kscope/releases/download/@VERSION@/kscope-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256_x86_64-unknown-linux-gnu@"
+    end
+  end
+
+  def install
+    bin.install "kscope"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/kscope --version")
+  end
+end

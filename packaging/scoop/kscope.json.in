@@ -1,0 +1,24 @@
+{
+    "version": "@VERSION@",
+    "description": "Fast, read-only Kubernetes TUI for logs, metrics and events across clusters",
+    "homepage": "https://github.com/hknerts/kscope",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/hknerts/kscope/releases/download/@VERSION@/kscope-x86_64-pc-windows-msvc.zip",
+            "hash": "@SHA256_x86_64-pc-windows-msvc@"
+        }
+    },
+    "bin": "kscope.exe",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/hknerts/kscope/releases/download/$version/kscope-x86_64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                }
+            }
+        }
+    }
+}
