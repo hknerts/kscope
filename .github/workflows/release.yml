@@ -101,6 +101,8 @@ jobs:
   manifests:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # attach the manifests to the release
     steps:
       - uses: actions/checkout@v7
       - run: packaging/render.sh "$GITHUB_REF_NAME" dist
