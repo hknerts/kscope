@@ -21,6 +21,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   across a fleet as well (`kscope get pods -u stg -o json | jq`). `-o name`
   prints `context/namespace/name`, one per line. The table stays the default.
 
+### Changed
+
+- **`s` saves logs to the data directory, not the working directory.** Run
+  from a repository, kscope no longer fills the checkout with
+  `kscope-*.log` files. The new `logs.save_dir` key picks another directory
+  (`~/` works); the default is the platform data directory
+  (`~/.local/share/kscope` on Linux). The directory is created when missing,
+  and the status bar shows the full path written.
+
 ### Fixed
 
 - Two log lines with the same timestamp are both shown; the second used to

@@ -238,7 +238,7 @@ completions are the configured fleets. `:fleet` alone leaves the fleet.
 | `l` / `m` / `e` | switch to logs / metrics / events |
 | `F` / `w` | toggle follow / wrapping |
 | `t` / `p` | toggle timestamps / previous (crashed) container |
-| `c` / `s` | clear buffer / save visible buffer to a file |
+| `c` / `s` | clear buffer / save visible buffer to a file in `logs.save_dir` |
 | `[` `]` | horizontal scroll when wrapping is off |
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
@@ -463,6 +463,12 @@ directory, or pass `-c FILE` / set `KSCOPE_CONFIG`:
 | macOS | `~/Library/Application Support/io.kscope.kscope/config.toml` |
 | Windows | `%APPDATA%\kscope\kscope\config\config.toml` |
 
+`s` saves the visible log buffer as `kscope-YYYYMMDD-HHMMSS.log` in
+`logs.save_dir`, by default the platform data directory
+(`~/.local/share/kscope` on Linux, `~/Library/Application Support/io.kscope.kscope`
+on macOS, `%APPDATA%\kscope\kscope\data` on Windows), never the directory
+kscope was started from. The status bar shows the full path written.
+
 
 ```toml
 [general]
@@ -482,6 +488,7 @@ buffer_lines = 0     # 0 = unlimited (default): never evict
 tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
 max_streams = 50     # cap on concurrent container log streams
+# save_dir = "~/kscope-logs"   # where s saves; default: the platform data dir
 
 [metrics]
 refresh_ms = 5000

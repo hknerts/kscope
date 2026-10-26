@@ -2628,17 +2628,37 @@ impl App {
         }
     }
 
+    /// `s`: write the visible buffer to `kscope-YYYYMMDD-HHMMSS.log` in
+    /// `logs.save_dir` (the platform data directory by default, never the
+    /// working directory), creating it if needed. The status bar names the
+    /// full path, since it is not where kscope was started.
     fn save_buffer(&mut self) {
-        let name = format!(
+        let Some(dir) = self.config.logs.save_dir() else {
+            self.set_status(
+                "save failed: no data directory found; set logs.save_dir in the config",
+                StatusKind::Error,
+            );
+            return;
+        };
+        let path = dir.join(format!(
             "kscope-{}.log",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
-        );
-        match std::fs::write(&name, self.buffer.to_plain_text()) {
+        ));
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, self.buffer.to_plain_text()));
+        match written {
             Ok(()) => self.set_status(
-                format!("wrote {} lines to {name}", self.buffer.view_len()),
+                format!(
+                    "wrote {} lines to {}",
+                    self.buffer.view_len(),
+                    path.display()
+                ),
                 StatusKind::Info,
             ),
-            Err(err) => self.set_status(format!("save failed: {err}"), StatusKind::Error),
+            Err(err) => self.set_status(
+                format!("save failed: {}: {err}", path.display()),
+                StatusKind::Error,
+            ),
         }
     }
 
@@ -2772,6 +2792,42 @@ pub(crate) mod tests {
             source: Arc::from("shop/api:app"),
             lines: lines.map(|i| format!("INFO line {i:04}")).collect(),
         }
+    }
+
+    #[tokio::test]
+    async fn saving_writes_into_the_configured_dir_and_names_the_full_path() {
+        let dir = std::env::temp_dir().join(format!("kscope-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = Config::default();
+        // Two levels that do not exist yet: both are created.
+        config.logs.save_dir = Some(dir.join("nested"));
+        let mut app = test_app(config);
+        app.on_log(batch(0..3));
+
+        app.save_buffer();
+        assert_eq!(app.status.kind, StatusKind::Info, "{}", app.status.text);
+        let saved: Vec<_> = std::fs::read_dir(dir.join("nested"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        let file = &saved[0];
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("kscope-") && name.ends_with(".log"),
+            "{name}"
+        );
+        assert!(
+            app.status.text.ends_with(&file.display().to_string()),
+            "the status names the full path: {}",
+            app.status.text
+        );
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap().lines().count(),
+            3,
+            "the visible lines"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

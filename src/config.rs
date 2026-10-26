@@ -93,6 +93,11 @@ pub struct LogsConfig {
     /// stops a large DaemonSet from opening hundreds of watches against the
     /// API server. Mirrors stern's `--max-log-requests`.
     pub max_streams: usize,
+    /// Where `s` writes the visible buffer. `None` (the default) means the
+    /// platform data directory, never the working directory. A leading `~/`
+    /// is the home directory; a relative path is relative to where kscope
+    /// was started. Created when missing.
+    pub save_dir: Option<PathBuf>,
 }
 
 impl Default for LogsConfig {
@@ -106,7 +111,35 @@ impl Default for LogsConfig {
             wrap: false,
             smart_case: true,
             max_streams: 50,
+            save_dir: None,
         }
+    }
+}
+
+impl LogsConfig {
+    /// The directory `s` saves into: `save_dir` when set, else the platform
+    /// data directory (`~/.local/share/kscope` on Linux,
+    /// `~/Library/Application Support/io.kscope.kscope` on macOS). `None`
+    /// only when no home directory can be found and nothing is configured.
+    pub fn save_dir(&self) -> Option<PathBuf> {
+        match &self.save_dir {
+            Some(dir) => Some(expand_home(dir)),
+            None => directories::ProjectDirs::from("io", "kscope", "kscope")
+                .map(|d| d.data_dir().to_path_buf()),
+        }
+    }
+}
+
+/// `~` or `~/rest` → the home directory (joined with `rest`). TOML has no
+/// shell to do it, and a literal `~` directory would land in the working
+/// directory, which is what `save_dir` exists to avoid.
+fn expand_home(path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    match directories::BaseDirs::new() {
+        Some(base) => base.home_dir().join(rest),
+        None => path.to_path_buf(),
     }
 }
 
@@ -334,6 +367,28 @@ mod tests {
         assert_eq!(c.logs.tail_lines, 0);
         assert!(c.metrics.refresh_ms >= 1000);
         assert!(c.general.max_fps > 0);
+    }
+
+    #[test]
+    fn logs_are_saved_to_the_data_dir_unless_configured() {
+        let logs = LogsConfig::default();
+        let dir = logs.save_dir().expect("a home directory in tests");
+        let data = directories::ProjectDirs::from("io", "kscope", "kscope").unwrap();
+        assert_eq!(dir, data.data_dir());
+        assert!(dir.is_absolute(), "never the working directory");
+
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"/var/tmp/kscope\"\n").unwrap();
+        assert_eq!(c.logs.save_dir(), Some(PathBuf::from("/var/tmp/kscope")));
+
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"~/kscope-logs\"\n").unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(c.logs.save_dir(), Some(home.join("kscope-logs")));
+        // Only a whole leading `~` component is the home directory.
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"~logs\"\n").unwrap();
+        assert_eq!(c.logs.save_dir(), Some(PathBuf::from("~logs")));
     }
 
     #[test]
