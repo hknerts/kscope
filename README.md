@@ -202,6 +202,11 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `Enter` | apply |
 | `Esc` | cancel |
 
+`:fleet stg` (or `:u stg`) switches fleet from anywhere, the list or any tab,
+with the same rules as `-u`: a fleet name, a plain word matching every
+context that contains it, or globs (`:fleet stg-*,qa-eu`). After `:fleet ` the
+completions are the configured fleets. `:fleet` alone leaves the fleet.
+
 ### Resource list
 
 | Key | Action |
@@ -211,6 +216,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `d` | describe it: a tab like `l` `m` `e`, which lead straight on from it |
 | `a` | in a fleet: the object on every cluster, drift flagged |
 | `/` | filter the list by name or namespace |
+| `S` | cycle sort: name → age (newest first) → status (problems first) → restarts (pods, most first) |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
 | `Ctrl-r` | re-list now |
@@ -233,7 +239,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `l` / `m` / `e` | switch to logs / metrics / events |
 | `F` / `w` | toggle follow / wrapping |
 | `t` / `p` | toggle timestamps / previous (crashed) container |
-| `c` / `s` | clear buffer / save visible buffer to a file |
+| `c` / `s` | clear buffer / save visible buffer to a file in `logs.save_dir` |
 | `[` `]` | horizontal scroll when wrapping is off |
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
@@ -361,9 +367,9 @@ member at once**, with a `context` column:
 * **Open elsewhere**: `m`, `e` or `d` on a row from another cluster switch
   kscope to that cluster and open the object there. `Esc` brings you back
   to the fleet-wide list, still filtered.
-* **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
-  and globs as `-u`.
-* **Leave**: pick a single context in the pane.
+* **Ad hoc**: no config needed. `/` on the contexts pane, or `:fleet` from
+  anywhere, takes the same words and globs as `-u`.
+* **Leave**: pick a single context in the pane, or `:fleet` with no name.
 
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
 `Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to
@@ -390,6 +396,20 @@ $ kscope get sts -u prod -n data
 workload's or Service's summed over its pods, `-` when a cluster has no
 metrics-server or a pod is not running. `IMAGE` is `name:version` without the
 registry. Kinds that run no pods (ConfigMaps, say) get neither column.
+
+For scripts, `-o json` prints a JSON array of
+`{context, namespace, name, status, age_seconds}` (`[]` when nothing matches),
+and `-o name` prints `context/namespace/name`, one per line. The namespace is
+empty for cluster-scoped kinds (`kind-stg-eu//worker`):
+
+```console
+$ kscope get pods -u stg -o json | jq -r '.[] | select(.status != "Running") | .name'
+$ kscope get deploy -u stg -n shop -o name
+kind-stg-eu/shop/cart
+kind-stg-eu/shop/checkout
+kind-stg-us/shop/cart
+kind-stg-us/shop/checkout
+```
 
 `get` exits 0 even when nothing matches, as kubectl does. For grep-style exit
 codes use `--find TEXT -k KIND`, which exits 1 when nothing matches.
@@ -444,6 +464,12 @@ directory, or pass `-c FILE` / set `KSCOPE_CONFIG`:
 | macOS | `~/Library/Application Support/io.kscope.kscope/config.toml` |
 | Windows | `%APPDATA%\kscope\kscope\config\config.toml` |
 
+`s` saves the visible log buffer as `kscope-YYYYMMDD-HHMMSS.log` in
+`logs.save_dir`, by default the platform data directory
+(`~/.local/share/kscope` on Linux, `~/Library/Application Support/io.kscope.kscope`
+on macOS, `%APPDATA%\kscope\kscope\data` on Windows), never the directory
+kscope was started from. The status bar shows the full path written.
+
 
 ```toml
 [general]
@@ -463,6 +489,7 @@ buffer_lines = 0     # 0 = unlimited (default): never evict
 tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
 max_streams = 50     # cap on concurrent container log streams
+# save_dir = "~/kscope-logs"   # where s saves; default: the platform data dir
 
 [metrics]
 refresh_ms = 5000
