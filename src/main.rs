@@ -103,6 +103,7 @@ async fn main() -> Result<()> {
             &scope,
             cli.selector.as_deref().unwrap_or(""),
             &needle,
+            cli.output(),
         )
         .await?;
         if !found {
@@ -170,7 +171,8 @@ struct Start {
 /// `--find`: list `kind` on every member (or just the connected context),
 /// print the rows whose namespace or name contains `needle`, and report
 /// whether there were any. Unreachable members go to stderr, not stdout, so
-/// the table stays pipeable.
+/// the table (or JSON, or names) stays pipeable.
+#[allow(clippy::too_many_arguments)]
 async fn find(
     clients: &k8s::fleet::Clients,
     context_name: &str,
@@ -179,6 +181,7 @@ async fn find(
     scope: &Scope,
     selector: &str,
     needle: &str,
+    output: cli::Output,
 ) -> Result<bool> {
     let client = clients.get(context_name).await?;
     let types = k8s::bounded(k8s::resources::discover(&client))
@@ -208,6 +211,21 @@ async fn find(
                 || r.namespace.to_ascii_lowercase().contains(&needle)
         })
         .collect();
+    match output {
+        cli::Output::Table => {}
+        // `[]` when nothing matches, so `| jq` never sees empty input.
+        cli::Output::Json => {
+            let rows: Vec<serde_json::Value> = hits.iter().map(|r| r.to_json()).collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            return Ok(!hits.is_empty());
+        }
+        cli::Output::Name => {
+            for r in &hits {
+                println!("{}", r.qualified_name());
+            }
+            return Ok(!hits.is_empty());
+        }
+    }
     // Usage after status, as in `kubectl top`; "-" without metrics-server.
     // Images last, as in `kubectl get -o wide`, as name:version. Both only for
     // kinds that run or select pods.
@@ -280,6 +298,8 @@ fn setup_terminal(mouse: bool) -> Result<Tui> {
 
 fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode()?;
+    // Disabling capture is harmless when `M` already released it, so this
+    // leaves the terminal clean whichever mode kscope quit in.
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
@@ -573,6 +593,15 @@ async fn run(
                 met_tx.clone(),
                 evt_tx.clone(),
             );
+        }
+
+        // `M` released or re-took the mouse; only the loop owns the terminal.
+        if std::mem::take(&mut app.mouse_stale) {
+            if app.mouse_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
         }
 
         if app.fleet.is_some() && last_member_pods.elapsed() >= fleet_refresh {

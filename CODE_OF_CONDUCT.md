@@ -28,7 +28,8 @@ Maintainers are responsible for clarifying these standards and may remove,
 edit or reject contributions that do not align with them, and may temporarily
 or permanently ban any contributor for behaviour they deem inappropriate.
 
-Report problems to **conduct@kscope.dev**. All reports are reviewed and
+Report problems privately to the maintainers listed in
+[MAINTAINERS.md](MAINTAINERS.md). All reports are reviewed and
 investigated, and the reporter's identity is kept confidential.
 
 This Code of Conduct is adapted from the spirit of the

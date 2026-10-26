@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// A fast, read-only Kubernetes TUI for logs and live metrics.
 #[derive(Debug, Parser)]
@@ -62,8 +62,9 @@ pub struct Cli {
     #[arg(long, value_name = "N")]
     pub tail: Option<i64>,
 
-    /// Maximum lines held in memory. 0 (the default) means unlimited, so you
-    /// can always scroll back to the start of the session.
+    /// Maximum lines held in memory (50000 by default); the oldest are
+    /// evicted. 0 means unlimited, so you can always scroll back to the start
+    /// of the session.
     #[arg(long, value_name = "N")]
     pub buffer: Option<usize>,
 
@@ -100,7 +101,24 @@ pub enum Command {
         kind: String,
         /// Only objects whose name or namespace contains this.
         name: Option<String>,
+        /// Output format: the table (default), `json` (an array of
+        /// `{context, namespace, name, status, age_seconds}`) or `name`
+        /// (`context/namespace/name`, one per line).
+        #[arg(short, long, value_enum, default_value_t = Output::Table)]
+        output: Output,
     },
+}
+
+/// How `get` prints what it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Output {
+    /// Aligned columns, like `kubectl get`.
+    #[default]
+    Table,
+    /// A JSON array, one object per row, for `jq` and scripts.
+    Json,
+    /// `context/namespace/name`, one per line.
+    Name,
 }
 
 impl Cli {
@@ -108,12 +126,21 @@ impl Cli {
     /// when nothing matches)`. `get` behaves like kubectl and exits 0 on an
     /// empty result; `--find` behaves like grep.
     pub fn search(&self) -> Option<(String, String, bool)> {
-        if let Some(Command::Get { kind, name }) = &self.command {
+        if let Some(Command::Get { kind, name, .. }) = &self.command {
             return Some((kind.clone(), name.clone().unwrap_or_default(), false));
         }
         let text = self.find.clone()?;
         let kind = self.kind.clone().unwrap_or_else(|| "pods".to_string());
         Some((kind, text, true))
+    }
+
+    /// How to print the search result. Only `get` takes `-o`; `--find`
+    /// always prints the table.
+    pub fn output(&self) -> Output {
+        match &self.command {
+            Some(Command::Get { output, .. }) => *output,
+            None => Output::Table,
+        }
     }
 
     /// Split a `--dump pod:container` argument.
@@ -168,6 +195,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_get_output_formats() {
+        assert_eq!(
+            Cli::parse_from(["kscope", "get", "pods", "-u", "stg"]).output(),
+            Output::Table
+        );
+        for (argv, want) in [
+            (
+                &["kscope", "get", "pods", "-u", "stg", "-o", "json"][..],
+                Output::Json,
+            ),
+            (
+                &["kscope", "get", "pods", "--output", "name"][..],
+                Output::Name,
+            ),
+            (
+                &["kscope", "get", "deploy", "api", "-o", "name", "-u", "prod"][..],
+                Output::Name,
+            ),
+            (
+                &["kscope", "-u", "stg", "get", "pods", "-o", "table"][..],
+                Output::Table,
+            ),
+        ] {
+            let cli = Cli::parse_from(argv);
+            assert_eq!(cli.output(), want, "{argv:?}");
+            assert!(cli.search().is_some());
+        }
+        assert!(Cli::try_parse_from(["kscope", "get", "pods", "-o", "yaml"]).is_err());
+        assert_eq!(
+            Cli::parse_from(["kscope", "--find", "api"]).output(),
+            Output::Table
+        );
+    }
+
+    #[test]
     fn parses_fleet_search() {
         let cli = Cli::parse_from([
             "kscope", "--fleet", "stg-*", "-k", "deploy", "--find", "api",
@@ -175,5 +237,76 @@ mod tests {
         assert_eq!(cli.fleet.as_deref(), Some("stg-*"));
         assert_eq!(cli.kind.as_deref(), Some("deploy"));
         assert_eq!(cli.find.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn find_searches_pods_by_default_and_exits_one_on_no_match() {
+        let cli = Cli::parse_from(["kscope", "--find", "api"]);
+        assert_eq!(cli.search(), Some(("pods".into(), "api".into(), true)));
+    }
+
+    #[test]
+    fn get_wins_over_find() {
+        // A subcommand is the explicit request; --find is ignored with it.
+        let cli = Cli::parse_from(["kscope", "--find", "x", "get", "svc"]);
+        assert_eq!(cli.search(), Some(("svc".into(), String::new(), false)));
+    }
+
+    #[test]
+    fn conflicting_flags_are_rejected() {
+        let err = Cli::try_parse_from(["kscope", "-A", "-n", "shop"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        let err = Cli::try_parse_from(["kscope", "--find", "a", "--dump", "b"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn numeric_flags_are_validated() {
+        assert!(Cli::try_parse_from(["kscope", "--tail", "many"]).is_err());
+        assert!(Cli::try_parse_from(["kscope", "--buffer", "-1"]).is_err());
+        let cli = Cli::parse_from([
+            "kscope",
+            "--tail",
+            "100",
+            "--buffer",
+            "0",
+            "--since",
+            "3600",
+            "--refresh",
+            "2000",
+            "--timestamps",
+        ]);
+        assert_eq!(cli.tail, Some(100));
+        assert_eq!(cli.buffer, Some(0));
+        assert_eq!(cli.since, Some(3600));
+        assert_eq!(cli.refresh, Some(2000));
+        assert!(cli.timestamps);
+    }
+
+    #[test]
+    fn global_flags_work_after_the_subcommand() {
+        let cli = Cli::parse_from([
+            "kscope",
+            "get",
+            "pods",
+            "-l",
+            "app=api",
+            "-A",
+            "--context",
+            "kind-a",
+        ]);
+        assert_eq!(cli.selector.as_deref(), Some("app=api"));
+        assert!(cli.all_namespaces);
+        assert_eq!(cli.context.as_deref(), Some("kind-a"));
+    }
+
+    #[test]
+    fn a_dump_target_splits_on_the_first_colon_only() {
+        let cli = Cli::parse_from(["kscope", "--dump", "api-0:app:extra"]);
+        assert_eq!(
+            cli.dump_target(),
+            Some(("api-0".into(), Some("app:extra".into())))
+        );
+        assert_eq!(Cli::parse_from(["kscope"]).dump_target(), None);
     }
 }

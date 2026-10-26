@@ -24,6 +24,10 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
             ),
             ("/", "filter by name, namespace or cluster"),
             (
+                "S",
+                "sort: name, newest, problems first, most restarts (pods)",
+            ),
+            (
                 "!",
                 "only problems: crash loops, pending, not ready, failed",
             ),
@@ -62,6 +66,11 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j k  ↑ ↓", "move;  Ctrl-d/u half page,  g/G top/bottom"),
             ("Tab", "between clusters and the list"),
+            (
+                ":fleet stg",
+                "switch fleet (words and globs as -u); :fleet alone leaves",
+            ),
+            ("M", "mouse: off to select and copy text, on to scroll"),
             ("Esc", "back one step: from any tab to the list, then quit"),
             ("?", "this help"),
             ("q  Ctrl-c", "quit"),
