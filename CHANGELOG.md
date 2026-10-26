@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-26
+
 ### Added
 
 - **Sort the list (`S`).** `S` in the list cycles name → age (newest
