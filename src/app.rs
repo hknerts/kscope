@@ -2860,11 +2860,7 @@ pub(crate) mod tests {
         palette(&mut app, "fleet");
         press(&mut app, KeyCode::Enter);
         assert!(app.fleet.is_none());
-        assert!(
-            app.status.text.contains("left the fleet"),
-            "{}",
-            app.status.text
-        );
+        assert!(app.status.text.contains("left the fleet"));
 
         // And the palette still picks resource types.
         palette(&mut app, "po");
