@@ -20,6 +20,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `{context, namespace, name, status, age_seconds}` for `jq` and scripts,
   across a fleet as well (`kscope get pods -u stg -o json | jq`). `-o name`
   prints `context/namespace/name`, one per line. The table stays the default.
+- **`M` toggles mouse capture at runtime** (#25). Off, the terminal selects
+  text again, so a log line or an error can be copied out; on, the wheel
+  scrolls. The status bar says `mouse off: select text` while it is off.
+  `general.mouse` is still the starting state, and the terminal is restored
+  correctly whichever mode kscope quits in.
 
 ### Changed
 

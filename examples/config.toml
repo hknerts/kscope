@@ -11,6 +11,8 @@ max_fps = 30
 # Pods, nodes and events are watched, so changes show up immediately; this
 # is how often the browsed list is re-listed and idle snapshots re-sent.
 inventory_refresh_ms = 5000
+# Capture the mouse for wheel scrolling on start-up. M toggles it at runtime:
+# off, the terminal selects and copies text as usual.
 mouse = true
 
 [describe]

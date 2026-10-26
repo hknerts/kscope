@@ -70,6 +70,7 @@ const BINDINGS: &[(&str, &[(&str, &str)])] = &[
                 ":fleet stg",
                 "switch fleet (words and globs as -u); :fleet alone leaves",
             ),
+            ("M", "mouse: off to select and copy text, on to scroll"),
             ("Esc", "back one step: from any tab to the list, then quit"),
             ("?", "this help"),
             ("q  Ctrl-c", "quit"),
