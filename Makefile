@@ -1,4 +1,4 @@
-.PHONY: help build run test lint fmt check audit coverage docker clean install dev-up dev-down
+.PHONY: help build run test lint fmt check audit coverage docker clean install dev-up dev-down demo
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,6 +32,9 @@ dev-up: ## Create 4 local kind clusters (2 stg, 2 prod) with workloads
 
 dev-down: ## Delete the local dev clusters
 	hack/dev-clusters.sh down
+
+demo: build ## Record assets/demo.gif with vhs (needs make dev-up)
+	vhs hack/demo.tape
 
 install: ## Install into ~/.cargo/bin
 	cargo install --path . --locked

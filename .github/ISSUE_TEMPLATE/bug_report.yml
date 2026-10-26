@@ -19,7 +19,7 @@ body:
     id: version
     attributes:
       label: kscope version
-      placeholder: "kscope 0.1.0"
+      placeholder: "kscope 1.7.0"
     validations:
       required: true
   - type: input
