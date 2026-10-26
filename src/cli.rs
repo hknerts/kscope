@@ -237,4 +237,75 @@ mod tests {
         assert_eq!(cli.kind.as_deref(), Some("deploy"));
         assert_eq!(cli.find.as_deref(), Some("api"));
     }
+
+    #[test]
+    fn find_searches_pods_by_default_and_exits_one_on_no_match() {
+        let cli = Cli::parse_from(["kscope", "--find", "api"]);
+        assert_eq!(cli.search(), Some(("pods".into(), "api".into(), true)));
+    }
+
+    #[test]
+    fn get_wins_over_find() {
+        // A subcommand is the explicit request; --find is ignored with it.
+        let cli = Cli::parse_from(["kscope", "--find", "x", "get", "svc"]);
+        assert_eq!(cli.search(), Some(("svc".into(), String::new(), false)));
+    }
+
+    #[test]
+    fn conflicting_flags_are_rejected() {
+        let err = Cli::try_parse_from(["kscope", "-A", "-n", "shop"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        let err = Cli::try_parse_from(["kscope", "--find", "a", "--dump", "b"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn numeric_flags_are_validated() {
+        assert!(Cli::try_parse_from(["kscope", "--tail", "many"]).is_err());
+        assert!(Cli::try_parse_from(["kscope", "--buffer", "-1"]).is_err());
+        let cli = Cli::parse_from([
+            "kscope",
+            "--tail",
+            "100",
+            "--buffer",
+            "0",
+            "--since",
+            "3600",
+            "--refresh",
+            "2000",
+            "--timestamps",
+        ]);
+        assert_eq!(cli.tail, Some(100));
+        assert_eq!(cli.buffer, Some(0));
+        assert_eq!(cli.since, Some(3600));
+        assert_eq!(cli.refresh, Some(2000));
+        assert!(cli.timestamps);
+    }
+
+    #[test]
+    fn global_flags_work_after_the_subcommand() {
+        let cli = Cli::parse_from([
+            "kscope",
+            "get",
+            "pods",
+            "-l",
+            "app=api",
+            "-A",
+            "--context",
+            "kind-a",
+        ]);
+        assert_eq!(cli.selector.as_deref(), Some("app=api"));
+        assert!(cli.all_namespaces);
+        assert_eq!(cli.context.as_deref(), Some("kind-a"));
+    }
+
+    #[test]
+    fn a_dump_target_splits_on_the_first_colon_only() {
+        let cli = Cli::parse_from(["kscope", "--dump", "api-0:app:extra"]);
+        assert_eq!(
+            cli.dump_target(),
+            Some(("api-0".into(), Some("app:extra".into())))
+        );
+        assert_eq!(Cli::parse_from(["kscope"]).dump_target(), None);
+    }
 }

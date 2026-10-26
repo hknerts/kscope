@@ -8,10 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Sort the list (`S`).** `S` in the list cycles name → age (newest
+  first) → status (problems first) and, for pods, → restarts (most first).
+  The order is named in the list title (`pods · all · by age`), and the
+  selection stays on the same object when the order changes.
 - **`kscope get -o json` and `-o name`.** `-o json` prints a JSON array of
   `{context, namespace, name, status, age_seconds}` for `jq` and scripts,
   across a fleet as well (`kscope get pods -u stg -o json | jq`). `-o name`
   prints `context/namespace/name`, one per line. The table stays the default.
+
+### Fixed
+
+- Two log lines with the same timestamp are both shown; the second used to
+  be dropped as if a reconnect had replayed it.
+- A search hit is highlighted even on a word a built-in rule colours
+  (`ERROR`, a status code, part of a timestamp).
+- A malformed hex colour in the theme, such as `"#aéabc"`, falls back to
+  the terminal default instead of crashing kscope on start-up.
 
 ## [1.7.0] - 2026-10-21
 
