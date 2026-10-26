@@ -653,6 +653,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             }
         },
     }
+    // Only said when off: it explains why the wheel no longer scrolls.
+    if !app.mouse_capture {
+        fact(
+            "mouse off: select text".to_string(),
+            Style::default().fg(theme.warn()),
+        );
+    }
     fact("? help".to_string(), dim);
     facts.push(Span::raw(" "));
 
@@ -731,6 +738,36 @@ mod tests {
     fn truncates_with_ellipsis() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("averylongpodname", 8), "averylo…");
+    }
+
+    #[test]
+    fn truncation_counts_characters_not_bytes() {
+        assert_eq!(truncate("añoñaño", 7), "añoñaño");
+        assert_eq!(truncate("añoñaño", 4), "año…");
+        assert_eq!(truncate("exact", 5), "exact");
+        assert_eq!(truncate("abc", 1), "…");
+        assert_eq!(truncate("abc", 0), "…");
+        assert_eq!(truncate("", 0), "");
+    }
+
+    #[test]
+    fn table_window_survives_a_zero_height_and_a_stale_selection() {
+        // A selection past the end (the list shrank) shows the tail.
+        assert_eq!(table_window(500, 20, 5), 15..20);
+        // Height 0 (a squashed terminal) still shows the selected row.
+        assert_eq!(table_window(7, 20, 0), 7..8);
+    }
+
+    #[test]
+    fn a_centred_popup_sits_inside_its_area() {
+        let area = Rect::new(10, 5, 100, 40);
+        let popup = centered_rect(60, 50, area);
+        assert_eq!((popup.width, popup.height), (60, 20));
+        assert!(popup.x >= area.x && popup.right() <= area.right());
+        assert!(popup.y >= area.y && popup.bottom() <= area.bottom());
+        assert_eq!(popup.x - area.x, area.right() - popup.right());
+        let full = centered_rect(100, 100, area);
+        assert_eq!(full, area);
     }
 }
 
@@ -877,6 +914,19 @@ mod render_tests {
     }
 
     #[tokio::test]
+    async fn the_status_bar_says_when_the_mouse_is_released() {
+        let mut app = test_app(Config::default());
+        let status = |app: &mut App| render(app, 160, 30)[29].clone();
+        assert!(!status(&mut app).contains("mouse off"));
+        app.mouse_capture = false;
+        let line = status(&mut app);
+        assert!(
+            line.trim_end().ends_with("mouse off: select text · ? help"),
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_fleet_list_has_a_context_column_and_a_fleet_badge() {
         let mut app = test_app(Config::default());
         app.enter_fleet(Fleet {
@@ -902,6 +952,26 @@ mod render_tests {
             screen.contains("stg-us") && screen.contains("checkout-2"),
             "{screen}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_list_title_names_any_order_but_the_default() {
+        let mut app = test_app(Config::default());
+        app.on_listing(Ok(Listing {
+            rows: vec![ResourceRow {
+                namespace: "shop".into(),
+                name: "checkout-1".into(),
+                ..Default::default()
+            }],
+            failed: vec![],
+        }));
+        app.current_type = Some(0);
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(!screen.contains(" · by "), "{screen}");
+
+        app.row_sort = crate::app::RowSort::Age;
+        let screen = render(&mut app, 160, 30).join("\n");
+        assert!(screen.contains("pods · default · by age"), "{screen}");
     }
 
     #[tokio::test]

@@ -564,26 +564,37 @@ impl Highlighter {
         };
         let base = line.level.style(&self.theme);
 
+        // Search hits must win, so they are found first and any rule match
+        // that overlaps one is dropped. Empty matches paint nothing.
+        let hits: Vec<(usize, usize)> = search
+            .map(|re| {
+                re.find_iter(text)
+                    .filter(|m| !m.is_empty())
+                    .take(64)
+                    .map(|m| (m.start(), m.end()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Collect non-overlapping spans, earlier rules win.
         let mut marks: Vec<(usize, usize, Style)> = Vec::new();
         for (re, style) in &self.rules {
             for m in re.find_iter(text).take(64) {
+                if hits.iter().any(|&(s, e)| m.start() < e && s < m.end()) {
+                    continue;
+                }
                 marks.push((m.start(), m.end(), *style));
             }
         }
-        if let Some(re) = search {
-            let hit = self.theme.match_style();
-            for m in re.find_iter(text).take(64) {
-                marks.push((m.start(), m.end(), hit));
-            }
-        }
+        let hit = self.theme.match_style();
+        marks.extend(hits.iter().map(|&(s, e)| (s, e, hit)));
 
         if marks.is_empty() {
             return Line::from(Span::styled(text, base));
         }
 
-        // Search hits must win: they were pushed last, so sort keeps them last
-        // for equal starts and the dedup below prefers the later entry.
+        // By start, longest first; the sort is stable, so among equal spans
+        // the earlier rule is kept and the later ones skipped below.
         marks.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
         let mut spans: Vec<Span<'a>> = Vec::with_capacity(marks.len() * 2 + 1);
@@ -767,6 +778,54 @@ mod tests {
         assert_eq!(buf.search_forward(0, &re), Some(1));
         assert_eq!(buf.search_backward(2, &re), Some(1));
         assert_eq!(buf.search_forward(2, &re), None);
+    }
+
+    fn hit_style(rendered: &Line<'_>, text: &str) -> Option<Style> {
+        rendered
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == text)
+            .map(|s| s.style)
+    }
+
+    #[test]
+    fn a_search_hit_wins_over_a_built_in_rule_on_the_same_word() {
+        // The severity rule also matches "ERROR"; the search hit must still
+        // be the one painted, or searching for a highlighted word shows nothing.
+        let theme = Theme::default();
+        let highlighter = Highlighter::new(&theme, &[]);
+        let entry = line("ERROR payment failed");
+        let search = Regex::new("ERROR").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
+        let style = hit_style(&rendered, "ERROR").expect("search hit is its own span");
+        assert_eq!(style.bg, theme.match_style().bg);
+    }
+
+    #[test]
+    fn a_search_hit_inside_a_longer_rule_match_is_still_shown() {
+        // The timestamp rule covers the whole stamp; a hit inside it used to
+        // be skipped because the longer mark had already moved the cursor.
+        let theme = Theme::default();
+        let highlighter = Highlighter::new(&theme, &[]);
+        let entry = line("2024-05-01T10:11:12Z ready");
+        let search = Regex::new("10:11").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
+        let style = hit_style(&rendered, "10:11").expect("search hit is its own span");
+        assert_eq!(style.bg, theme.match_style().bg);
+    }
+
+    #[test]
+    fn an_empty_search_match_leaves_the_line_intact() {
+        let highlighter = Highlighter::new(&Theme::default(), &[]);
+        let entry = line("WARN retrying in 5s");
+        let search = Regex::new("x*").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
     }
 
     #[test]

@@ -305,3 +305,30 @@ fn config_round_trips_through_toml() {
     // Unset values keep their defaults.
     assert_eq!(config.metrics.warn_pct, 75.0);
 }
+
+/// `kscope get -o json` across a fleet: rows from two members with the same
+/// `namespace/name` come out as distinct objects a script can tell apart.
+#[test]
+fn fleet_rows_serialise_for_scripts() {
+    use kscope::k8s::resources::ResourceRow;
+    let rows: Vec<ResourceRow> = ["stg-eu", "stg-us"]
+        .into_iter()
+        .map(|context| ResourceRow {
+            context: context.into(),
+            namespace: "shop".into(),
+            name: "checkout".into(),
+            status: "2/2".into(),
+            age_seconds: 3_600,
+            ..Default::default()
+        })
+        .collect();
+    let json: Vec<serde_json::Value> = rows.iter().map(ResourceRow::to_json).collect();
+    let text = serde_json::to_string_pretty(&json).unwrap();
+    let back: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0]["context"], "stg-eu");
+    assert_eq!(back[1]["context"], "stg-us");
+    assert_eq!(back[1]["age_seconds"], 3_600);
+    let names: Vec<String> = rows.iter().map(ResourceRow::qualified_name).collect();
+    assert_eq!(names, ["stg-eu/shop/checkout", "stg-us/shop/checkout"]);
+}

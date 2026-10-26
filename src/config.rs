@@ -100,6 +100,11 @@ pub struct LogsConfig {
     /// stops a large DaemonSet from opening hundreds of watches against the
     /// API server. Mirrors stern's `--max-log-requests`.
     pub max_streams: usize,
+    /// Where `s` writes the visible buffer. `None` (the default) means the
+    /// platform data directory, never the working directory. A leading `~/`
+    /// is the home directory; a relative path is relative to where kscope
+    /// was started. Created when missing.
+    pub save_dir: Option<PathBuf>,
 }
 
 impl Default for LogsConfig {
@@ -113,7 +118,35 @@ impl Default for LogsConfig {
             wrap: false,
             smart_case: true,
             max_streams: 50,
+            save_dir: None,
         }
+    }
+}
+
+impl LogsConfig {
+    /// The directory `s` saves into: `save_dir` when set, else the platform
+    /// data directory (`~/.local/share/kscope` on Linux,
+    /// `~/Library/Application Support/io.kscope.kscope` on macOS). `None`
+    /// only when no home directory can be found and nothing is configured.
+    pub fn save_dir(&self) -> Option<PathBuf> {
+        match &self.save_dir {
+            Some(dir) => Some(expand_home(dir)),
+            None => directories::ProjectDirs::from("io", "kscope", "kscope")
+                .map(|d| d.data_dir().to_path_buf()),
+        }
+    }
+}
+
+/// `~` or `~/rest` → the home directory (joined with `rest`). TOML has no
+/// shell to do it, and a literal `~` directory would land in the working
+/// directory, which is what `save_dir` exists to avoid.
+fn expand_home(path: &Path) -> PathBuf {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return path.to_path_buf();
+    };
+    match directories::BaseDirs::new() {
+        Some(base) => base.home_dir().join(rest),
+        None => path.to_path_buf(),
     }
 }
 
@@ -224,7 +257,9 @@ impl Theme {
 
 fn parse_hex(s: &str) -> Option<Color> {
     let s = s.strip_prefix('#')?;
-    if s.len() != 6 {
+    // Checked byte by byte first: slicing a non-ASCII string at 2 and 4 would
+    // panic, and `from_str_radix` alone accepts a leading `+`.
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -342,6 +377,28 @@ mod tests {
     }
 
     #[test]
+    fn logs_are_saved_to_the_data_dir_unless_configured() {
+        let logs = LogsConfig::default();
+        let dir = logs.save_dir().expect("a home directory in tests");
+        let data = directories::ProjectDirs::from("io", "kscope", "kscope").unwrap();
+        assert_eq!(dir, data.data_dir());
+        assert!(dir.is_absolute(), "never the working directory");
+
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"/var/tmp/kscope\"\n").unwrap();
+        assert_eq!(c.logs.save_dir(), Some(PathBuf::from("/var/tmp/kscope")));
+
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"~/kscope-logs\"\n").unwrap();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(c.logs.save_dir(), Some(home.join("kscope-logs")));
+        // Only a whole leading `~` component is the home directory.
+        let c: Config = toml::from_str("[logs]\nsave_dir = \"~logs\"\n").unwrap();
+        assert_eq!(c.logs.save_dir(), Some(PathBuf::from("~logs")));
+    }
+
+    #[test]
     fn parses_partial_config() {
         let c: Config = toml::from_str("[logs]\nbuffer_lines = 10\n").unwrap();
         assert_eq!(c.logs.buffer_lines, 10);
@@ -401,6 +458,132 @@ mod tests {
         assert_eq!(c.fleets["edge"], vec!["edge-*"]);
         assert!(!c.fleets.contains_key("prod"));
         assert_eq!(c.fleets.len(), 3);
+    }
+
+    #[test]
+    fn a_malformed_hex_colour_falls_back_instead_of_panicking() {
+        // Six bytes, but "é" straddles the first two-byte slice: slicing the
+        // string there used to panic on start-up with a bad theme.
+        assert_eq!(Theme::color("#aéabc"), Color::Reset);
+        // from_str_radix accepts a sign; a colour must not.
+        assert_eq!(Theme::color("#+f+f+f"), Color::Reset);
+        assert_eq!(Theme::color("#12345"), Color::Reset);
+        assert_eq!(Theme::color("#1234567"), Color::Reset);
+        assert_eq!(Theme::color("#gg0000"), Color::Reset);
+        assert_eq!(Theme::color("ff8800"), Color::Reset);
+    }
+
+    /// A config file of our own in the temp dir, removed when dropped.
+    struct TempConfig(PathBuf);
+
+    impl TempConfig {
+        fn new(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("kscope-test-{}-{name}.toml", std::process::id()));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempConfig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_missing_file_loads_the_defaults() {
+        let path = std::env::temp_dir().join("kscope-test-definitely-not-here.toml");
+        let c = Config::load(Some(&path)).unwrap();
+        assert_eq!(c.logs.max_streams, LogsConfig::default().max_streams);
+        assert!(c.fleets.is_empty());
+    }
+
+    #[test]
+    fn loads_a_file_from_disk() {
+        let file = TempConfig::new(
+            "valid",
+            "[general]\nnamespace = \"shop\"\nmouse = false\n\n\
+             [theme]\naccent = \"#00ff00\"\n\n\
+             [[highlight]]\npattern = \"user=\\\\w+\"\n",
+        );
+        let c = Config::load(Some(&file.0)).unwrap();
+        assert_eq!(c.general.namespace.as_deref(), Some("shop"));
+        assert!(!c.general.mouse);
+        assert_eq!(c.general.max_fps, General::default().max_fps);
+        assert_eq!(c.theme.accent(), Color::Rgb(0, 0xff, 0));
+        assert_eq!(
+            c.theme.error(),
+            Color::Red,
+            "unset theme keys keep defaults"
+        );
+        assert_eq!(c.highlight.len(), 1);
+        assert_eq!(c.highlight[0].pattern, "user=\\w+");
+        assert_eq!(c.highlight[0].fg, "magenta", "a rule's colour defaults");
+        assert!(!c.highlight[0].bold);
+    }
+
+    #[test]
+    fn a_broken_file_is_an_error_that_names_it() {
+        let file = TempConfig::new("broken", "[logs\nbuffer_lines = ");
+        let err = Config::load(Some(&file.0)).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("parsing config file"), "{message}");
+        assert!(message.contains(&file.0.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn a_wrongly_typed_value_is_an_error_not_a_default() {
+        let file = TempConfig::new("typed", "[logs]\nbuffer_lines = \"lots\"\n");
+        assert!(Config::load(Some(&file.0)).is_err());
+    }
+
+    #[test]
+    fn describe_defaults_hide_secrets_but_allow_reveal() {
+        let c = Config::default();
+        assert!(!c.describe.show_secret_values);
+        assert!(c.describe.allow_reveal);
+    }
+
+    #[test]
+    fn fleet_variables_are_lower_cased_and_a_bare_prefix_is_ignored() {
+        let mut c = Config::default();
+        c.merge_fleets(env(&[
+            ("KSCOPE_FLEET_", "ignored-*"),
+            ("KSCOPE_FLEET_EU", " eu-1 ,, eu-2 ,"),
+        ]));
+        assert_eq!(c.fleets["eu"], vec!["eu-1", "eu-2"]);
+        assert!(!c.fleets.contains_key(""));
+        assert!(c
+            .fleets
+            .values()
+            .all(|g| !g.contains(&"ignored-*".to_string())));
+    }
+
+    #[test]
+    fn an_empty_fleet_in_the_file_switches_a_built_in_off() {
+        let mut c: Config = toml::from_str("[fleets]\nprod = []\n").unwrap();
+        c.merge_fleets(env(&[]));
+        assert!(!c.fleets.contains_key("prod"));
+        assert!(c.fleets.contains_key("stg"));
+    }
+
+    #[test]
+    fn colour_names_ignore_case_and_whitespace() {
+        assert_eq!(Theme::color(" DarkGrey "), Color::DarkGray);
+        assert_eq!(Theme::color("GREY"), Color::Gray);
+        assert_eq!(Theme::color("white"), Color::Gray);
+        assert_eq!(Theme::color("LightCyan"), Color::LightCyan);
+        assert_eq!(Theme::color(""), Color::Reset);
+        assert_eq!(Theme::color("#FFAA00"), Color::Rgb(0xff, 0xaa, 0x00));
+    }
+
+    #[test]
+    fn the_match_style_is_bold_on_the_match_colours() {
+        let style = Theme::default().match_style();
+        assert_eq!(style.fg, Some(Color::Black));
+        assert_eq!(style.bg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

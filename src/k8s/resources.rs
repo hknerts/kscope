@@ -142,6 +142,9 @@ pub struct ResourceRow {
     /// True when `status` reads as a problem, so the table can colour it and
     /// the "problems only" filter can pick it out.
     pub unhealthy: bool,
+    /// Container restarts summed over a pod's containers; 0 for every other
+    /// kind. Lets the list put the restart-happy pods at the top.
+    pub restarts: i64,
     /// The object's own pod selector, when it has one. Lets a Service (or a
     /// CRD shaped like one) resolve to the pods whose logs it fronts.
     pub selector: std::collections::BTreeMap<String, String>,
@@ -165,6 +168,25 @@ impl ResourceRow {
         } else {
             format!("{}/{}", self.namespace, self.name)
         }
+    }
+
+    /// `context/namespace/name`, as `kscope get -o name` prints it. The
+    /// namespace segment stays (empty) for cluster-scoped objects, so the
+    /// name is always the third `/`-separated field.
+    pub fn qualified_name(&self) -> String {
+        format!("{}/{}/{}", self.context, self.namespace, self.name)
+    }
+
+    /// The row as `kscope get -o json` prints it. A stable, small shape for
+    /// scripts; the table's derived columns (usage, images) are left out.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "context": self.context,
+            "namespace": self.namespace,
+            "name": self.name,
+            "status": self.status,
+            "age_seconds": self.age_seconds,
+        })
     }
 
     /// Unique across a fleet: the same `namespace/name` can exist in every
@@ -311,6 +333,7 @@ fn convert(obj: &DynamicObject, now: i64) -> ResourceRow {
         age_seconds,
         status,
         unhealthy,
+        restarts: restart_count(&obj.data),
         selector: pod_selector(&obj.data),
         images: container_images(&obj.data),
         usage: None,
@@ -376,6 +399,17 @@ fn pod_selector(data: &serde_json::Value) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A pod's container restarts, summed. Init containers are left out, as
+/// `kubectl get pods` leaves them out of its RESTARTS column.
+fn restart_count(data: &serde_json::Value) -> i64 {
+    data["status"]["containerStatuses"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["restartCount"].as_i64())
+        .sum()
 }
 
 /// A one-word health summary from whatever shape the object happens to have.
@@ -489,6 +523,37 @@ pub fn contexts() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_print_as_json_and_qualified_names() {
+        let pod = ResourceRow {
+            context: "stg-eu".into(),
+            namespace: "shop".into(),
+            name: "api-0".into(),
+            status: "Running".into(),
+            age_seconds: 90,
+            images: vec!["busybox:1.36".into()],
+            ..Default::default()
+        };
+        assert_eq!(pod.qualified_name(), "stg-eu/shop/api-0");
+        assert_eq!(
+            pod.to_json(),
+            serde_json::json!({
+                "context": "stg-eu",
+                "namespace": "shop",
+                "name": "api-0",
+                "status": "Running",
+                "age_seconds": 90,
+            })
+        );
+        let node = ResourceRow {
+            context: "stg-eu".into(),
+            name: "worker".into(),
+            ..Default::default()
+        };
+        assert_eq!(node.qualified_name(), "stg-eu//worker");
+        assert_eq!(node.to_json()["namespace"], "");
+    }
 
     #[test]
     fn usage_is_a_pods_own_or_the_sum_of_what_a_workload_selects() {
@@ -659,6 +724,17 @@ mod tests {
             "Running",
         );
         assert_eq!(summarise(&obj), ("CrashLoopBackOff".to_string(), true));
+        assert_eq!(restart_count(&obj), 7);
+    }
+
+    #[test]
+    fn restarts_are_summed_over_containers_and_zero_without_any() {
+        let obj = pod(
+            json!([{"restartCount": 2}, {"restartCount": 5}, {"ready": true}]),
+            "Running",
+        );
+        assert_eq!(restart_count(&obj), 7);
+        assert_eq!(restart_count(&json!({"status": {"replicas": 3}})), 0);
     }
 
     #[test]
