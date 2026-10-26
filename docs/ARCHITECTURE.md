@@ -85,12 +85,14 @@ Design choices worth defending:
   enum. Filtering and colouring never re-scan text. Classification itself only
   looks at the first 512 bytes and uses a non-allocating case-insensitive scan
   with word-boundary checks, so `cherry` is not an `err`.
-* **Unbounded by default, ring buffer on request.** Retention is a policy
-  decision, not an implementation detail: `logs.buffer_lines = 0` (the default)
-  keeps every line of the session so scrollback always reaches the container's
-  first line, and a positive value swaps in eviction. The status bar reports
-  resident bytes so the unbounded mode is never a silent surprise. The real
-  ceiling is the kubelet's log rotation, which no client can see past.
+* **Bounded by default, unbounded on request.** Retention is a policy
+  decision, not an implementation detail. The default is a 50 000 line ring
+  (`logs.buffer_lines`): about one kubelet log file at the default 10 MiB
+  `containerLogMaxSize`, so one noisy pod or a fleet-wide merge has a memory
+  ceiling. The log pane counts what was evicted, so a scrollback that stops
+  short is never a silent surprise. `buffer_lines = 0` keeps every line of the
+  session instead, and the pane then reports resident bytes. The real ceiling
+  on history is the kubelet's log rotation, which no client can see past.
 * **Ring buffer with a global id space.** `lines[0]` has id `base`; evicting the
   front increments `base`. The filtered view stores ids, not indices, so
   eviction is O(1) instead of shifting every index.
@@ -187,9 +189,9 @@ scope by policy.
 * Unit tests live next to the code they cover (classification, quantity parsing,
   ring buffer, decoders).
 * `tests/integration.rs` exercises the full log pipeline in both modes —
-  250 000 lines through an unbounded buffer (asserting nothing is evicted and
-  line zero is still reachable) and 200 000 lines through a 50 000 line ring
-  buffer, plus filter, search and export and the metric store without a
+  the default ring evicting and counting, 250 000 lines through an unbounded
+  buffer (asserting nothing is evicted and line zero is still reachable) and
+  200 000 lines through a 50 000 line ring buffer, plus filter, search and export and the metric store without a
   cluster.
 * CI additionally runs a `kind` end-to-end job that starts a real pod, installs
   metrics-server, and asserts `kscope --dump` returns the expected lines.

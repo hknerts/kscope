@@ -149,6 +149,41 @@ impl SortBy {
     }
 }
 
+/// Sort order for the resource list. Rows arrive ordered by namespace and
+/// name (a fleet's by context first), so `Name` keeps that order and every
+/// other order is a stable sort on top of it: ties stay alphabetical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowSort {
+    #[default]
+    Name,
+    /// Newest first.
+    Age,
+    /// Problems first, then grouped by status text.
+    Status,
+    /// Most restarts first. Only offered for pods.
+    Restarts,
+}
+
+impl RowSort {
+    /// The order after this one; restarts are in the cycle only for pods.
+    pub fn next(self, pods: bool) -> Self {
+        match self {
+            RowSort::Name => RowSort::Age,
+            RowSort::Age => RowSort::Status,
+            RowSort::Status if pods => RowSort::Restarts,
+            RowSort::Status | RowSort::Restarts => RowSort::Name,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            RowSort::Name => "name",
+            RowSort::Age => "age",
+            RowSort::Status => "status",
+            RowSort::Restarts => "restarts",
+        }
+    }
+}
+
 /// Which metric table the content pane focuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricPane {
@@ -215,6 +250,13 @@ pub struct App {
     /// Set when the namespace scope changes: the pollers are bound to a scope
     /// at spawn time, so they have to be restarted to follow it.
     pub pollers_stale: bool,
+    /// Whether the terminal captures the mouse (wheel scrolling). Off, the
+    /// terminal selects text instead, so a log line can be copied out.
+    /// Starts from `general.mouse`; `M` flips it.
+    pub mouse_capture: bool,
+    /// Set when `mouse_capture` changes: the main loop owns the terminal and
+    /// applies it there.
+    pub mouse_stale: bool,
 
     // ------------------------------------------------------------ resources
     /// Every listable kind the cluster serves, from its discovery API.
@@ -227,6 +269,8 @@ pub struct App {
     pub row_view: Vec<usize>,
     pub row_selected: usize,
     pub row_filter: Option<String>,
+    /// `S` while browsing: the order of `row_view`.
+    pub row_sort: RowSort,
     /// `-l`/`--selector`: narrows both the browsed list and the pods a
     /// workload's logs are collected from.
     pub selector: LabelSelector,
@@ -351,6 +395,7 @@ impl App {
         contexts: Vec<ContextEntry>,
     ) -> Self {
         let highlighter = Highlighter::new(&config.theme, &config.highlight);
+        let mouse_capture = config.general.mouse;
         let buffer = LogBuffer::new(config.logs.buffer_lines);
         let metrics = MetricsStore::new(config.metrics.history);
         let names: Vec<String> = contexts.iter().map(|c| c.name.clone()).collect();
@@ -380,12 +425,15 @@ impl App {
             pending_open: None,
             start_kind: None,
             pollers_stale: false,
+            mouse_capture,
+            mouse_stale: false,
             resource_types: Vec::new(),
             current_type: None,
             rows: Vec::new(),
             row_view: Vec::new(),
             row_selected: 0,
             row_filter: None,
+            row_sort: RowSort::default(),
             selector: LabelSelector::default(),
             selector_text: String::new(),
             problems_only: false,
@@ -553,7 +601,19 @@ impl App {
             })
             .map(|(i, _)| i)
             .collect();
+        let rows = &self.rows;
+        match self.row_sort {
+            RowSort::Name => {}
+            RowSort::Age => self.row_view.sort_by_key(|&i| rows[i].age_seconds),
+            RowSort::Status => self
+                .row_view
+                .sort_by_key(|&i| (!rows[i].unhealthy, rows[i].status.as_str())),
+            RowSort::Restarts => self
+                .row_view
+                .sort_by_key(|&i| std::cmp::Reverse(rows[i].restarts)),
+        }
 
+        // The selection follows its object to wherever the order put it.
         self.row_selected = previous
             .and_then(|key| {
                 self.row_view
@@ -563,6 +623,21 @@ impl App {
             .unwrap_or(0);
         self.row_selected = self.row_selected.min(self.row_view.len().saturating_sub(1));
         self.rebuild_event_view();
+    }
+
+    /// `S` in the list: the next sort order, keeping the selected object.
+    fn cycle_row_sort(&mut self) {
+        let pods = self.current_type().is_some_and(|t| t.api.kind == "Pod");
+        self.row_sort = self.row_sort.next(pods);
+        self.rebuild_row_view();
+        self.set_status(
+            format!(
+                "sorting {} by {} — S for the next order",
+                self.resource_label(),
+                self.row_sort.label()
+            ),
+            StatusKind::Info,
+        );
     }
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &ResourceRow> {
@@ -645,6 +720,11 @@ impl App {
                 self.row_view.clear();
                 self.row_selected = 0;
                 self.row_filter = None;
+                // Restarts mean nothing for other kinds; any other order
+                // carries over.
+                if self.row_sort == RowSort::Restarts && kind.api.kind != "Pod" {
+                    self.row_sort = RowSort::Name;
+                }
                 self.rows_error = None;
                 self.right = RightMode::Browse;
                 self.pane = Pane::Resources;
@@ -721,6 +801,9 @@ impl App {
         self.fleet = Some(fleet);
         self.fleet_failed.clear();
         self.reset_rows();
+        // The list is what a fleet changes, so it is what comes into view,
+        // from any tab, describe included.
+        self.describe_open = false;
         self.right = RightMode::Browse;
         self.pane = Pane::Resources;
         self.request_rows();
@@ -735,6 +818,25 @@ impl App {
                 StatusKind::Warn,
             ),
         }
+    }
+
+    /// `:fleet <spec>` from the palette: enter that fleet, or leave the one
+    /// browsed when `spec` is empty.
+    fn apply_fleet_command(&mut self, spec: &str) {
+        if !spec.is_empty() {
+            return self.apply_fleet_input(spec);
+        }
+        if self.fleet.take().is_none() {
+            return self.set_status("not browsing a fleet", StatusKind::Info);
+        }
+        self.fleet_failed.clear();
+        self.reset_rows();
+        self.describe_open = false;
+        self.right = RightMode::Browse;
+        self.pane = Pane::Resources;
+        self.request_rows();
+        let name = self.context_name.clone();
+        self.set_status(format!("left the fleet, browsing {name}"), StatusKind::Info);
     }
 
     fn reset_rows(&mut self) {
@@ -1803,7 +1905,7 @@ impl App {
         match event {
             Event::Key(key) => self.on_key(key),
             Event::Resize(_, _) => self.dirty = true,
-            Event::Mouse(m) if self.config.general.mouse => match m.kind {
+            Event::Mouse(m) if self.mouse_capture => match m.kind {
                 MouseEventKind::ScrollUp => self.scroll_by(-3),
                 MouseEventKind::ScrollDown => self.scroll_by(3),
                 _ => {}
@@ -2035,6 +2137,10 @@ impl App {
                 );
             }
 
+            KeyCode::Char('M') => self.toggle_mouse_capture(),
+
+            // `S` sorts whatever is in front: the list, or a metric table.
+            KeyCode::Char('S') if self.right == RightMode::Browse => self.cycle_row_sort(),
             KeyCode::Char('S') => {
                 self.sort_by = self.sort_by.next();
                 let label = self.sort_by.label();
@@ -2043,6 +2149,21 @@ impl App {
 
             _ => {}
         }
+    }
+
+    /// `M`: hand the mouse to the terminal so text can be selected and
+    /// copied, or take it back for wheel scrolling.
+    fn toggle_mouse_capture(&mut self) {
+        self.mouse_capture = !self.mouse_capture;
+        self.mouse_stale = true;
+        self.set_status(
+            if self.mouse_capture {
+                "mouse on — the wheel scrolls; M to select text"
+            } else {
+                "mouse off — select text with the mouse; M to scroll again"
+            },
+            StatusKind::Info,
+        );
     }
 
     /// `Esc` steps back out: any tab, describe included → browse → quit.
@@ -2116,6 +2237,14 @@ impl App {
         match key.code {
             KeyCode::Esc => self.close_palette(),
             KeyCode::Enter => {
+                // `:fleet stg` takes the words as typed, with the rules of
+                // `-u`: a highlighted name is only taken once Tab or an
+                // arrow has put it in the prompt.
+                if let Some((_, spec)) = crate::palette::fleet_command(&self.input) {
+                    let spec = spec.to_string();
+                    self.close_palette();
+                    return self.apply_fleet_command(&spec);
+                }
                 let chosen = self
                     .palette
                     .current()
@@ -2130,32 +2259,32 @@ impl App {
                 if let Some(completion) = self.palette.current().map(str::to_string) {
                     if completion == self.input {
                         self.palette.move_selection(1);
+                        self.take_fleet_completion();
                     } else {
                         self.input = completion;
-                        let input = self.input.clone();
-                        self.palette.refilter(&input);
+                        self.refresh_palette();
                     }
                 }
                 self.dirty = true;
             }
             KeyCode::BackTab | KeyCode::Up => {
                 self.palette.move_selection(-1);
+                self.take_fleet_completion();
                 self.dirty = true;
             }
             KeyCode::Down => {
                 self.palette.move_selection(1);
+                self.take_fleet_completion();
                 self.dirty = true;
             }
             KeyCode::Backspace => {
                 self.input.pop();
-                let input = self.input.clone();
-                self.palette.refilter(&input);
+                self.refresh_palette();
                 self.dirty = true;
             }
             KeyCode::Char(c) => {
                 self.input.push(c);
-                let input = self.input.clone();
-                self.palette.refilter(&input);
+                self.refresh_palette();
                 self.dirty = true;
             }
             _ => {}
@@ -2165,16 +2294,42 @@ impl App {
     fn open_palette(&mut self) {
         self.mode = InputMode::Command;
         self.input.clear();
-        // One entry per kind, displayed by its canonical plural but matched on
-        // every alias too, so `pvc` reaches persistentvolumeclaims instead of
-        // fuzzy-matching some unrelated plural.
-        let candidates: Vec<Candidate> = self
-            .resource_types
-            .iter()
-            .map(|t| Candidate::with_keys(t.name(), t.aliases()))
-            .collect();
-        self.palette.reload(candidates, "");
+        self.refresh_palette();
         self.dirty = true;
+    }
+
+    /// Re-rank the palette against the prompt. Resource types, until the
+    /// prompt reads `fleet ` (or `u `): then the fleets of the left pane.
+    fn refresh_palette(&mut self) {
+        let candidates: Vec<Candidate> = match crate::palette::completing_fleet(&self.input) {
+            Some(verb) => self
+                .fleets
+                .iter()
+                .map(|f| Candidate::new(format!("{verb} {}", f.name)))
+                .collect(),
+            // One entry per kind, displayed by its canonical plural but
+            // matched on every alias too, so `pvc` reaches
+            // persistentvolumeclaims instead of fuzzy-matching some
+            // unrelated plural.
+            None => self
+                .resource_types
+                .iter()
+                .map(|t| Candidate::with_keys(t.name(), t.aliases()))
+                .collect(),
+        };
+        let input = self.input.clone();
+        self.palette.reload(candidates, &input);
+    }
+
+    /// While completing fleet names, moving the highlight puts it in the
+    /// prompt, because `Enter` applies the prompt as typed.
+    fn take_fleet_completion(&mut self) {
+        if crate::palette::completing_fleet(&self.input).is_none() {
+            return;
+        }
+        if let Some(completion) = self.palette.current() {
+            self.input = completion.to_string();
+        }
     }
 
     fn close_palette(&mut self) {
@@ -2500,17 +2655,37 @@ impl App {
         }
     }
 
+    /// `s`: write the visible buffer to `kscope-YYYYMMDD-HHMMSS.log` in
+    /// `logs.save_dir` (the platform data directory by default, never the
+    /// working directory), creating it if needed. The status bar names the
+    /// full path, since it is not where kscope was started.
     fn save_buffer(&mut self) {
-        let name = format!(
+        let Some(dir) = self.config.logs.save_dir() else {
+            self.set_status(
+                "save failed: no data directory found; set logs.save_dir in the config",
+                StatusKind::Error,
+            );
+            return;
+        };
+        let path = dir.join(format!(
             "kscope-{}.log",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
-        );
-        match std::fs::write(&name, self.buffer.to_plain_text()) {
+        ));
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(&path, self.buffer.to_plain_text()));
+        match written {
             Ok(()) => self.set_status(
-                format!("wrote {} lines to {name}", self.buffer.view_len()),
+                format!(
+                    "wrote {} lines to {}",
+                    self.buffer.view_len(),
+                    path.display()
+                ),
                 StatusKind::Info,
             ),
-            Err(err) => self.set_status(format!("save failed: {err}"), StatusKind::Error),
+            Err(err) => self.set_status(
+                format!("save failed: {}: {err}", path.display()),
+                StatusKind::Error,
+            ),
         }
     }
 
@@ -2565,6 +2740,15 @@ pub(crate) mod tests {
         assert_eq!(SortBy::Name.next(), SortBy::Cpu);
         assert_eq!(SortBy::Cpu.next(), SortBy::Memory);
         assert_eq!(SortBy::Memory.next(), SortBy::Name);
+    }
+
+    #[test]
+    fn row_sort_cycles_and_offers_restarts_only_for_pods() {
+        assert_eq!(RowSort::Name.next(true), RowSort::Age);
+        assert_eq!(RowSort::Age.next(true), RowSort::Status);
+        assert_eq!(RowSort::Status.next(true), RowSort::Restarts);
+        assert_eq!(RowSort::Restarts.next(true), RowSort::Name);
+        assert_eq!(RowSort::Status.next(false), RowSort::Name);
     }
 
     #[test]
@@ -2638,6 +2822,42 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn saving_writes_into_the_configured_dir_and_names_the_full_path() {
+        let dir = std::env::temp_dir().join(format!("kscope-save-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut config = Config::default();
+        // Two levels that do not exist yet: both are created.
+        config.logs.save_dir = Some(dir.join("nested"));
+        let mut app = test_app(config);
+        app.on_log(batch(0..3));
+
+        app.save_buffer();
+        assert_eq!(app.status.kind, StatusKind::Info, "{}", app.status.text);
+        let saved: Vec<_> = std::fs::read_dir(dir.join("nested"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(saved.len(), 1);
+        let file = &saved[0];
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("kscope-") && name.ends_with(".log"),
+            "{name}"
+        );
+        assert!(
+            app.status.text.ends_with(&file.display().to_string()),
+            "the status names the full path: {}",
+            app.status.text
+        );
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap().lines().count(),
+            3,
+            "the visible lines"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn eviction_keeps_the_search_cursor_and_scroll_on_their_lines() {
         let mut config = Config::default();
         config.logs.buffer_lines = 64; // the smallest ring
@@ -2663,6 +2883,130 @@ pub(crate) mod tests {
         // Once the matched line itself is evicted there is no current match.
         app.on_log(batch(74..120));
         assert_eq!(app.search.current, None);
+    }
+
+    #[tokio::test]
+    async fn fleet_in_the_palette_switches_from_the_list_and_from_a_tab() {
+        let mut config = Config::default();
+        config.fleets.insert("stg".into(), vec!["stg-*".into()]);
+        config.fleets.insert("prod".into(), vec!["prod-*".into()]);
+        let mut app = test_app(config);
+        app.on_listing(Ok(Listing {
+            rows: vec![row("", "api-1")],
+            failed: vec![],
+        }));
+        let press = |app: &mut App, code: KeyCode| app.on_event(Event::Key(KeyEvent::from(code)));
+        let palette = |app: &mut App, text: &str| {
+            press(app, KeyCode::Char(':'));
+            for c in text.chars() {
+                press(app, KeyCode::Char(c));
+            }
+        };
+
+        // From the list: a configured name.
+        palette(&mut app, "fleet stg");
+        press(&mut app, KeyCode::Enter);
+        let fleet = app.fleet.as_ref().unwrap();
+        assert_eq!((fleet.name.as_str(), fleet.members.len()), ("stg", 2));
+        assert_eq!(app.mode, InputMode::Normal);
+
+        // From a detail tab, with `u` and a plain word, as `-u` takes it.
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api-1")],
+            failed: vec![],
+        }));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.right, RightMode::Detail);
+        palette(&mut app, "u eu");
+        press(&mut app, KeyCode::Enter);
+        let members = &app.fleet.as_ref().unwrap().members;
+        assert_eq!(members, &["stg-eu".to_string(), "prod-eu".to_string()]);
+        assert_eq!(app.right, RightMode::Browse);
+        assert!(!app.describe_open);
+
+        // Completion offers the configured fleets; the arrows put the
+        // highlighted one in the prompt.
+        palette(&mut app, "fleet ");
+        assert_eq!(app.palette.matches, ["fleet stg", "fleet prod"]);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.input, "fleet prod");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.fleet.as_ref().unwrap().name, "prod");
+
+        // Nothing matching keeps the fleet and says so.
+        palette(&mut app, "fleet nope");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.fleet.as_ref().unwrap().name, "prod");
+        assert_eq!(app.status.kind, StatusKind::Warn);
+
+        // `:fleet` alone leaves it.
+        palette(&mut app, "fleet");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.fleet.is_none());
+        assert!(app.status.text.contains("left the fleet"));
+
+        // And the palette still picks resource types.
+        palette(&mut app, "po");
+        assert_eq!(app.palette.current(), Some("pods"));
+    }
+
+    #[tokio::test]
+    async fn sorting_the_list_keeps_the_selection_on_its_object() {
+        let mut app = test_app(Config::default());
+        let pod =
+            |name: &str, age: i64, status: &str, unhealthy: bool, restarts: i64| ResourceRow {
+                age_seconds: age,
+                status: status.into(),
+                unhealthy,
+                restarts,
+                ..row("", name)
+            };
+        app.on_listing(Ok(Listing {
+            rows: vec![
+                pod("api", 300, "Running ↺2", false, 2),
+                pod("cart", 60, "Running", false, 0),
+                pod("db", 900, "CrashLoopBackOff", true, 40),
+            ],
+            failed: vec![],
+        }));
+        let names =
+            |app: &App| -> Vec<String> { app.visible_rows().map(|r| r.name.clone()).collect() };
+        let sort = |app: &mut App| {
+            app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('S'))));
+        };
+        assert_eq!(names(&app), ["api", "cart", "db"]);
+        app.row_selected = 2; // db
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Age);
+        assert_eq!(names(&app), ["cart", "api", "db"]);
+        assert_eq!(app.selected_row().unwrap().name, "db");
+
+        // Problems first; the healthy keep name order between them.
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Status);
+        assert_eq!(names(&app), ["db", "cart", "api"]);
+        assert_eq!(app.selected_row().unwrap().name, "db");
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Restarts);
+        assert_eq!(names(&app), ["db", "api", "cart"]);
+        assert_eq!(app.row_selected, 0);
+
+        // A refresh keeps the order, and the filter applies on top of it.
+        app.row_filter = Some("a".into());
+        app.rebuild_row_view();
+        assert_eq!(names(&app), ["api", "cart"]);
+
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Name);
+
+        // In a detail tab `S` is still the metric tables' sort.
+        app.right = RightMode::Detail;
+        let metric_sort = app.sort_by;
+        sort(&mut app);
+        assert_eq!(app.row_sort, RowSort::Name);
+        assert_eq!(app.sort_by, metric_sort.next());
     }
 
     #[tokio::test]
@@ -2962,6 +3306,43 @@ pub(crate) mod tests {
         // The pod inventory has not arrived yet: that is not "no pods".
         app.set_view(View::Logs);
         assert_eq!(app.status.text, "waiting for the pod inventory…");
+    }
+
+    #[tokio::test]
+    async fn m_hands_the_mouse_to_the_terminal_and_back() {
+        let mut app = test_app(Config::default());
+        let m = |app: &mut App| app.on_event(Event::Key(KeyEvent::from(KeyCode::Char('M'))));
+        let scroll_down = |app: &mut App| {
+            app.on_event(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        assert!(app.mouse_capture && !app.mouse_stale);
+
+        m(&mut app);
+        assert!(!app.mouse_capture);
+        assert!(std::mem::take(&mut app.mouse_stale));
+        assert!(app.status.text.starts_with("mouse off"));
+        // A stray wheel event while released does nothing.
+        app.dirty = false;
+        scroll_down(&mut app);
+        assert!(!app.dirty);
+
+        m(&mut app);
+        assert!(app.mouse_capture);
+        assert!(std::mem::take(&mut app.mouse_stale));
+        assert!(app.status.text.starts_with("mouse on"));
+
+        // `general.mouse = false` is only the starting state.
+        let mut config = Config::default();
+        config.general.mouse = false;
+        let mut app = test_app(config);
+        assert!(!app.mouse_capture);
+        m(&mut app);
+        assert!(app.mouse_capture && app.mouse_stale);
     }
 
     #[tokio::test]

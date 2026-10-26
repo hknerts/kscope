@@ -187,13 +187,13 @@ docker run --rm -it -v ~/.kube:/home/nonroot/.kube:ro ghcr.io/hknerts/kscope:lat
 
 ```sh
 kscope                        # current context, current namespace
-                              # (full log history from container start, nothing evicted)
+                              # (log history from container start, last 50k lines kept)
 kscope -n payments            # a specific namespace
 kscope -A                     # every namespace you can read
 kscope --context staging      # start on a specific kubeconfig context
 kscope -l app=api,tier!=batch # only objects matching a label selector
 kscope --tail 2000            # only the last 2000 log lines instead of everything
-kscope --buffer 200000        # cap memory at 200k lines (ring buffer)
+kscope --buffer 200000        # keep 200k lines instead of 50k (0 = unlimited)
 kscope --since 3600           # only lines from the last hour
 kscope --dump checkout-7d9c:app > app.log   # non-interactive, for scripts
 kscope -u stg                 # every context with "stg" in its name, as one list
@@ -218,6 +218,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `Ctrl-b` / `Ctrl-f` | full page up / down |
 | `g` / `G` | top / bottom (bottom re-enables follow) |
 | `Ctrl-n` | change the namespace scope |
+| `M` | toggle mouse capture: off lets the terminal select and copy text, on scrolls with the wheel |
 
 ### In the `:` palette
 
@@ -229,6 +230,11 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `Enter` | apply |
 | `Esc` | cancel |
 
+`:fleet stg` (or `:u stg`) switches fleet from anywhere, the list or any tab,
+with the same rules as `-u`: a fleet name, a plain word matching every
+context that contains it, or globs (`:fleet stg-*,qa-eu`). After `:fleet ` the
+completions are the configured fleets. `:fleet` alone leaves the fleet.
+
 ### Resource list
 
 | Key | Action |
@@ -238,6 +244,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `d` | describe it: a tab like `l` `m` `e`, which lead straight on from it |
 | `a` | in a fleet: the object on every cluster, drift flagged |
 | `/` | filter the list by name or namespace |
+| `S` | cycle sort: name → age (newest first) → status (problems first) → restarts (pods, most first) |
 | `!` | only problems: crash loops, pending, not ready, failed (again to show all) |
 | `L` | set a label selector |
 | `Ctrl-r` | re-list now |
@@ -260,7 +267,7 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `l` / `m` / `e` | switch to logs / metrics / events |
 | `F` / `w` | toggle follow / wrapping |
 | `t` / `p` | toggle timestamps / previous (crashed) container |
-| `c` / `s` | clear buffer / save visible buffer to a file |
+| `c` / `s` | clear buffer / save visible buffer to a file in `logs.save_dir` |
 | `[` `]` | horizontal scroll when wrapping is off |
 | `x` | detach all streams |
 | `v` | on a Node: cycle kubelet / containerd / kernel |
@@ -388,9 +395,9 @@ member at once**, with a `context` column:
 * **Open elsewhere**: `m`, `e` or `d` on a row from another cluster switch
   kscope to that cluster and open the object there. `Esc` brings you back
   to the fleet-wide list, still filtered.
-* **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
-  and globs as `-u`.
-* **Leave**: pick a single context in the pane.
+* **Ad hoc**: no config needed. `/` on the contexts pane, or `:fleet` from
+  anywhere, takes the same words and globs as `-u`.
+* **Leave**: pick a single context in the pane, or `:fleet` with no name.
 
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
 `Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to
@@ -418,6 +425,20 @@ workload's or Service's summed over its pods, `-` when a cluster has no
 metrics-server or a pod is not running. `IMAGE` is `name:version` without the
 registry. Kinds that run no pods (ConfigMaps, say) get neither column.
 
+For scripts, `-o json` prints a JSON array of
+`{context, namespace, name, status, age_seconds}` (`[]` when nothing matches),
+and `-o name` prints `context/namespace/name`, one per line. The namespace is
+empty for cluster-scoped kinds (`kind-stg-eu//worker`):
+
+```console
+$ kscope get pods -u stg -o json | jq -r '.[] | select(.status != "Running") | .name'
+$ kscope get deploy -u stg -n shop -o name
+kind-stg-eu/shop/cart
+kind-stg-eu/shop/checkout
+kind-stg-us/shop/cart
+kind-stg-us/shop/checkout
+```
+
 `get` exits 0 even when nothing matches, as kubectl does. For grep-style exit
 codes use `--find TEXT -k KIND`, which exits 1 when nothing matches.
 
@@ -426,16 +447,19 @@ Every member uses the credentials of its own kubeconfig context, and the
 
 ## How far back can I scroll?
 
-By default, **all the way to the container's first line**. There are no limits
-on kscope's side:
+By default, **the last 50 000 lines**, filled from the container's first line:
 
 * On attach, kscope asks the API server for the container's entire retained
   history (`tail_lines` unset), not a fixed tail.
-* The in-memory buffer is **unbounded** by default (`logs.buffer_lines = 0`), so
-  nothing is evicted for the lifetime of the session. `g` jumps to the first
-  line, always.
-* The status bar shows the live line count, so an unbounded session cannot grow
-  silently.
+* The in-memory buffer is a **ring of 50 000 lines** by default
+  (`logs.buffer_lines`), about 12 MiB at a typical 200-byte line, so a noisy
+  pod or a fleet-wide merge cannot grow memory without limit. Once it is full
+  the oldest lines are evicted, and the log pane says how many
+  (`buffer 50000/50000 · 1200 evicted, oldest first`).
+* `logs.buffer_lines = 0` (or `--buffer 0`) makes it **unbounded**: nothing is
+  evicted for the lifetime of the session, and `g` always jumps to the first
+  line. The log pane then shows the live line count and resident size, so the
+  session cannot grow silently.
 
 Two limits are outside kscope's control, and it is worth knowing them:
 
@@ -451,11 +475,12 @@ Events have a third: the API server **expires them after about an hour**
 (`--event-ttl`). An empty events tab usually means "nothing has happened
 recently", not that something is broken.
 
-If you would rather trade history for a memory ceiling, set a cap:
+To keep more history, raise the cap or remove it; to fetch less, narrow the
+tail:
 
 ```toml
 [logs]
-buffer_lines = 200000   # ring buffer; oldest lines are evicted
+buffer_lines = 200000   # a bigger ring; 0 = unlimited, never evict
 tail_lines = 5000       # only fetch the last 5000 lines on attach
 ```
 
@@ -470,6 +495,12 @@ directory, or pass `-c FILE` / set `KSCOPE_CONFIG`:
 | Linux | `~/.config/kscope/config.toml` (or `$XDG_CONFIG_HOME/kscope/`) |
 | macOS | `~/Library/Application Support/io.kscope.kscope/config.toml` |
 | Windows | `%APPDATA%\kscope\kscope\config\config.toml` |
+
+`s` saves the visible log buffer as `kscope-YYYYMMDD-HHMMSS.log` in
+`logs.save_dir`, by default the platform data directory
+(`~/.local/share/kscope` on Linux, `~/Library/Application Support/io.kscope.kscope`
+on macOS, `%APPDATA%\kscope\kscope\data` on Windows), never the directory
+kscope was started from. The status bar shows the full path written.
 
 
 ```toml
@@ -486,10 +517,11 @@ allow_reveal = true          # v shows a Secret's values decoded; false forbids 
 qa = ["qa-*"]                # are built in, KSCOPE_FLEET_<NAME> overrides
 
 [logs]
-buffer_lines = 0     # 0 = unlimited (default): never evict
+buffer_lines = 50000 # ring buffer (default); 0 = unlimited, never evict
 tail_lines = 0       # 0 = everything the API server still has (default)
 smart_case = true
 max_streams = 50     # cap on concurrent container log streams
+# save_dir = "~/kscope-logs"   # where s saves; default: the platform data dir
 
 [metrics]
 refresh_ms = 5000
@@ -561,8 +593,8 @@ The design targets pods that emit tens of thousands of lines per second:
 * Log lines arrive in **batches** (512 lines or 100 ms) so a chatty container
   cannot livelock the render loop.
 * Lines are classified into a severity level exactly once, on arrival, and
-  stored in an unbounded deque — or a fixed-capacity ring buffer if you set
-  `logs.buffer_lines`.
+  stored in a fixed-capacity ring buffer (`logs.buffer_lines`, 50 000 by
+  default), or an unbounded deque with `buffer_lines = 0`.
 * The filtered view is a list of line ids maintained **incrementally**; only a
   filter change costs a full pass.
 * Redraws are capped at `general.max_fps` (30 by default) and only happen when

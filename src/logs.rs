@@ -2,10 +2,11 @@
 //!
 //! Design notes (this is the hot path, so it is worth stating explicitly):
 //!
-//! * Lines live in a [`VecDeque`]. By default it is **unbounded**, so a session
-//!   holds every line the container ever emitted; setting `logs.buffer_lines`
-//!   turns it into a fixed-capacity ring buffer that evicts the oldest lines.
-//!   Pushing is O(1) either way.
+//! * Lines live in a [`VecDeque`] used as a fixed-capacity ring buffer that
+//!   evicts the oldest lines (`logs.buffer_lines`, 50 000 by default), so a
+//!   noisy pod or a fleet-wide merge cannot grow memory without limit.
+//!   `buffer_lines = 0` makes it **unbounded**: the session then holds every
+//!   line the container ever emitted. Pushing is O(1) either way.
 //! * Every line is classified **once**, on arrival, into a [`Level`]. Filtering
 //!   and colouring then only look at a `u8`-sized enum instead of re-scanning
 //!   text on every frame.
@@ -389,11 +390,13 @@ impl LogBuffer {
     }
 
     pub fn clear(&mut self) {
+        // Retire the retained lines' ids. (`received - dropped` is not their
+        // count once an earlier clear has reset `dropped`.)
+        self.base += self.lines.len() as u64;
         self.lines.clear();
         self.view.clear();
         self.counts = [0; 6];
         self.bytes = 0;
-        self.base += self.received - self.dropped;
         self.dropped = 0;
     }
 
@@ -561,26 +564,37 @@ impl Highlighter {
         };
         let base = line.level.style(&self.theme);
 
+        // Search hits must win, so they are found first and any rule match
+        // that overlaps one is dropped. Empty matches paint nothing.
+        let hits: Vec<(usize, usize)> = search
+            .map(|re| {
+                re.find_iter(text)
+                    .filter(|m| !m.is_empty())
+                    .take(64)
+                    .map(|m| (m.start(), m.end()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Collect non-overlapping spans, earlier rules win.
         let mut marks: Vec<(usize, usize, Style)> = Vec::new();
         for (re, style) in &self.rules {
             for m in re.find_iter(text).take(64) {
+                if hits.iter().any(|&(s, e)| m.start() < e && s < m.end()) {
+                    continue;
+                }
                 marks.push((m.start(), m.end(), *style));
             }
         }
-        if let Some(re) = search {
-            let hit = self.theme.match_style();
-            for m in re.find_iter(text).take(64) {
-                marks.push((m.start(), m.end(), hit));
-            }
-        }
+        let hit = self.theme.match_style();
+        marks.extend(hits.iter().map(|&(s, e)| (s, e, hit)));
 
         if marks.is_empty() {
             return Line::from(Span::styled(text, base));
         }
 
-        // Search hits must win: they were pushed last, so sort keeps them last
-        // for equal starts and the dedup below prefers the later entry.
+        // By start, longest first; the sort is stable, so among equal spans
+        // the earlier rule is kept and the later ones skipped below.
         marks.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
         let mut spans: Vec<Span<'a>> = Vec::with_capacity(marks.len() * 2 + 1);
@@ -684,6 +698,46 @@ mod tests {
     }
 
     #[test]
+    fn ids_stay_dense_across_repeated_clears() {
+        let mut buf = LogBuffer::new(64);
+        for round in 0..3 {
+            for i in 0..100 {
+                buf.push(line(&format!("r{round} line {i}")));
+            }
+            buf.clear();
+            assert_eq!(buf.dropped, 0, "a clear restarts the evicted count");
+        }
+        // 300 lines received, all retired: the next one is id 300.
+        assert_eq!(buf.base, 300);
+        buf.push(line("after"));
+        assert_eq!(&*buf.view_line(0).unwrap().raw, "after");
+    }
+
+    #[test]
+    fn scanning_never_reads_past_either_end() {
+        // A needle as long as, or longer than, the haystack.
+        assert_eq!(find_ci(b"err", b"ERR"), Some(0));
+        assert_eq!(find_ci(b"er", b"err"), None);
+        assert_eq!(find_ci(b"", b"e"), None);
+        assert_eq!(find_ci(b"abc", b""), None);
+        // A match flush with the last byte, and a token at either edge.
+        assert_eq!(find_ci(b"xxERROR", b"error"), Some(2));
+        assert!(has_token(b"error", b"error"));
+        assert!(!has_token(b"errors", b"error"));
+        assert!(!has_token(b"e", b"error"));
+
+        // Timestamps: too short, no space within reach, multi-byte after.
+        assert_eq!(timestamp_len("2024-01-01T00:00:00Z"), 0);
+        assert_eq!(timestamp_len("2024-01-01T00:00:00Z!"), 0);
+        assert_eq!(timestamp_len(&format!("2024-01-01T{}", "0".repeat(80))), 0);
+        let l = line("2024-01-01T00:00:00.123456789Z ünïcode body");
+        assert_eq!(l.timestamp(), Some("2024-01-01T00:00:00.123456789Z"));
+        assert_eq!(l.body(), "ünïcode body");
+        // Classification only looks at the head, even of a huge line.
+        assert_eq!(classify(&format!("{} ERROR", "x".repeat(600))), Level::Info);
+    }
+
+    #[test]
     fn counts_matches_in_the_view() {
         let mut buf = LogBuffer::new(0);
         for i in 0..10 {
@@ -724,6 +778,54 @@ mod tests {
         assert_eq!(buf.search_forward(0, &re), Some(1));
         assert_eq!(buf.search_backward(2, &re), Some(1));
         assert_eq!(buf.search_forward(2, &re), None);
+    }
+
+    fn hit_style(rendered: &Line<'_>, text: &str) -> Option<Style> {
+        rendered
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == text)
+            .map(|s| s.style)
+    }
+
+    #[test]
+    fn a_search_hit_wins_over_a_built_in_rule_on_the_same_word() {
+        // The severity rule also matches "ERROR"; the search hit must still
+        // be the one painted, or searching for a highlighted word shows nothing.
+        let theme = Theme::default();
+        let highlighter = Highlighter::new(&theme, &[]);
+        let entry = line("ERROR payment failed");
+        let search = Regex::new("ERROR").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
+        let style = hit_style(&rendered, "ERROR").expect("search hit is its own span");
+        assert_eq!(style.bg, theme.match_style().bg);
+    }
+
+    #[test]
+    fn a_search_hit_inside_a_longer_rule_match_is_still_shown() {
+        // The timestamp rule covers the whole stamp; a hit inside it used to
+        // be skipped because the longer mark had already moved the cursor.
+        let theme = Theme::default();
+        let highlighter = Highlighter::new(&theme, &[]);
+        let entry = line("2024-05-01T10:11:12Z ready");
+        let search = Regex::new("10:11").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
+        let style = hit_style(&rendered, "10:11").expect("search hit is its own span");
+        assert_eq!(style.bg, theme.match_style().bg);
+    }
+
+    #[test]
+    fn an_empty_search_match_leaves_the_line_intact() {
+        let highlighter = Highlighter::new(&Theme::default(), &[]);
+        let entry = line("WARN retrying in 5s");
+        let search = Regex::new("x*").unwrap();
+        let rendered = highlighter.render(&entry, Some(&search), false);
+        let joined: String = rendered.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(joined, &*entry.raw);
     }
 
     #[test]
