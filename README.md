@@ -201,6 +201,11 @@ kscope get deploy checkout -u prod -n shop   # filter by name and namespace
 | `Enter` | apply |
 | `Esc` | cancel |
 
+`:fleet stg` (or `:u stg`) switches fleet from anywhere, the list or any tab,
+with the same rules as `-u`: a fleet name, a plain word matching every
+context that contains it, or globs (`:fleet stg-*,qa-eu`). After `:fleet ` the
+completions are the configured fleets. `:fleet` alone leaves the fleet.
+
 ### Resource list
 
 | Key | Action |
@@ -361,9 +366,9 @@ member at once**, with a `context` column:
 * **Open elsewhere**: `m`, `e` or `d` on a row from another cluster switch
   kscope to that cluster and open the object there. `Esc` brings you back
   to the fleet-wide list, still filtered.
-* **Ad hoc**: no config needed. `/` on the contexts pane takes the same words
-  and globs as `-u`.
-* **Leave**: pick a single context in the pane.
+* **Ad hoc**: no config needed. `/` on the contexts pane, or `:fleet` from
+  anywhere, takes the same words and globs as `-u`.
+* **Leave**: pick a single context in the pane, or `:fleet` with no name.
 
 A fleet lists across all namespaces unless `-n` is given (narrow it later with
 `Ctrl-n`). Members are queried concurrently, and each gets 10 seconds to

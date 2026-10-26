@@ -791,6 +791,9 @@ impl App {
         self.fleet = Some(fleet);
         self.fleet_failed.clear();
         self.reset_rows();
+        // The list is what a fleet changes, so it is what comes into view,
+        // from any tab, describe included.
+        self.describe_open = false;
         self.right = RightMode::Browse;
         self.pane = Pane::Resources;
         self.request_rows();
@@ -805,6 +808,25 @@ impl App {
                 StatusKind::Warn,
             ),
         }
+    }
+
+    /// `:fleet <spec>` from the palette: enter that fleet, or leave the one
+    /// browsed when `spec` is empty.
+    fn apply_fleet_command(&mut self, spec: &str) {
+        if !spec.is_empty() {
+            return self.apply_fleet_input(spec);
+        }
+        if self.fleet.take().is_none() {
+            return self.set_status("not browsing a fleet", StatusKind::Info);
+        }
+        self.fleet_failed.clear();
+        self.reset_rows();
+        self.describe_open = false;
+        self.right = RightMode::Browse;
+        self.pane = Pane::Resources;
+        self.request_rows();
+        let name = self.context_name.clone();
+        self.set_status(format!("left the fleet, browsing {name}"), StatusKind::Info);
     }
 
     fn reset_rows(&mut self) {
@@ -2188,6 +2210,14 @@ impl App {
         match key.code {
             KeyCode::Esc => self.close_palette(),
             KeyCode::Enter => {
+                // `:fleet stg` takes the words as typed, with the rules of
+                // `-u`: a highlighted name is only taken once Tab or an
+                // arrow has put it in the prompt.
+                if let Some((_, spec)) = crate::palette::fleet_command(&self.input) {
+                    let spec = spec.to_string();
+                    self.close_palette();
+                    return self.apply_fleet_command(&spec);
+                }
                 let chosen = self
                     .palette
                     .current()
@@ -2202,32 +2232,32 @@ impl App {
                 if let Some(completion) = self.palette.current().map(str::to_string) {
                     if completion == self.input {
                         self.palette.move_selection(1);
+                        self.take_fleet_completion();
                     } else {
                         self.input = completion;
-                        let input = self.input.clone();
-                        self.palette.refilter(&input);
+                        self.refresh_palette();
                     }
                 }
                 self.dirty = true;
             }
             KeyCode::BackTab | KeyCode::Up => {
                 self.palette.move_selection(-1);
+                self.take_fleet_completion();
                 self.dirty = true;
             }
             KeyCode::Down => {
                 self.palette.move_selection(1);
+                self.take_fleet_completion();
                 self.dirty = true;
             }
             KeyCode::Backspace => {
                 self.input.pop();
-                let input = self.input.clone();
-                self.palette.refilter(&input);
+                self.refresh_palette();
                 self.dirty = true;
             }
             KeyCode::Char(c) => {
                 self.input.push(c);
-                let input = self.input.clone();
-                self.palette.refilter(&input);
+                self.refresh_palette();
                 self.dirty = true;
             }
             _ => {}
@@ -2237,16 +2267,42 @@ impl App {
     fn open_palette(&mut self) {
         self.mode = InputMode::Command;
         self.input.clear();
-        // One entry per kind, displayed by its canonical plural but matched on
-        // every alias too, so `pvc` reaches persistentvolumeclaims instead of
-        // fuzzy-matching some unrelated plural.
-        let candidates: Vec<Candidate> = self
-            .resource_types
-            .iter()
-            .map(|t| Candidate::with_keys(t.name(), t.aliases()))
-            .collect();
-        self.palette.reload(candidates, "");
+        self.refresh_palette();
         self.dirty = true;
+    }
+
+    /// Re-rank the palette against the prompt. Resource types, until the
+    /// prompt reads `fleet ` (or `u `): then the fleets of the left pane.
+    fn refresh_palette(&mut self) {
+        let candidates: Vec<Candidate> = match crate::palette::completing_fleet(&self.input) {
+            Some(verb) => self
+                .fleets
+                .iter()
+                .map(|f| Candidate::new(format!("{verb} {}", f.name)))
+                .collect(),
+            // One entry per kind, displayed by its canonical plural but
+            // matched on every alias too, so `pvc` reaches
+            // persistentvolumeclaims instead of fuzzy-matching some
+            // unrelated plural.
+            None => self
+                .resource_types
+                .iter()
+                .map(|t| Candidate::with_keys(t.name(), t.aliases()))
+                .collect(),
+        };
+        let input = self.input.clone();
+        self.palette.reload(candidates, &input);
+    }
+
+    /// While completing fleet names, moving the highlight puts it in the
+    /// prompt, because `Enter` applies the prompt as typed.
+    fn take_fleet_completion(&mut self) {
+        if crate::palette::completing_fleet(&self.input).is_none() {
+            return;
+        }
+        if let Some(completion) = self.palette.current() {
+            self.input = completion.to_string();
+        }
     }
 
     fn close_palette(&mut self) {
@@ -2744,6 +2800,71 @@ pub(crate) mod tests {
         // Once the matched line itself is evicted there is no current match.
         app.on_log(batch(74..120));
         assert_eq!(app.search.current, None);
+    }
+
+    #[tokio::test]
+    async fn fleet_in_the_palette_switches_from_the_list_and_from_a_tab() {
+        let mut config = Config::default();
+        config.fleets.insert("stg".into(), vec!["stg-*".into()]);
+        config.fleets.insert("prod".into(), vec!["prod-*".into()]);
+        let mut app = test_app(config);
+        app.on_listing(Ok(Listing {
+            rows: vec![row("", "api-1")],
+            failed: vec![],
+        }));
+        let press = |app: &mut App, code: KeyCode| app.on_event(Event::Key(KeyEvent::from(code)));
+        let palette = |app: &mut App, text: &str| {
+            press(app, KeyCode::Char(':'));
+            for c in text.chars() {
+                press(app, KeyCode::Char(c));
+            }
+        };
+
+        // From the list: a configured name.
+        palette(&mut app, "fleet stg");
+        press(&mut app, KeyCode::Enter);
+        let fleet = app.fleet.as_ref().unwrap();
+        assert_eq!((fleet.name.as_str(), fleet.members.len()), ("stg", 2));
+        assert_eq!(app.mode, InputMode::Normal);
+
+        // From a detail tab, with `u` and a plain word, as `-u` takes it.
+        app.on_listing(Ok(Listing {
+            rows: vec![row("stg-eu", "api-1")],
+            failed: vec![],
+        }));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.right, RightMode::Detail);
+        palette(&mut app, "u eu");
+        press(&mut app, KeyCode::Enter);
+        let members = &app.fleet.as_ref().unwrap().members;
+        assert_eq!(members, &["stg-eu".to_string(), "prod-eu".to_string()]);
+        assert_eq!(app.right, RightMode::Browse);
+        assert!(!app.describe_open);
+
+        // Completion offers the configured fleets; the arrows put the
+        // highlighted one in the prompt.
+        palette(&mut app, "fleet ");
+        assert_eq!(app.palette.matches, ["fleet stg", "fleet prod"]);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.input, "fleet prod");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.fleet.as_ref().unwrap().name, "prod");
+
+        // Nothing matching keeps the fleet and says so.
+        palette(&mut app, "fleet nope");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.fleet.as_ref().unwrap().name, "prod");
+        assert_eq!(app.status.kind, StatusKind::Warn);
+
+        // `:fleet` alone leaves it.
+        palette(&mut app, "fleet");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.fleet.is_none());
+        assert!(app.status.text.contains("left the fleet"));
+
+        // And the palette still picks resource types.
+        palette(&mut app, "po");
+        assert_eq!(app.palette.current(), Some("pods"));
     }
 
     #[tokio::test]
