@@ -12,6 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first) → status (problems first) and, for pods, → restarts (most first).
   The order is named in the list title (`pods · all · by age`), and the
   selection stays on the same object when the order changes.
+- **`:fleet <name>` switches fleet from anywhere**, the list or any tab, with
+  the rules of `-u`: a fleet name, a plain word (every context containing
+  it) or globs. `:u` is short for it, the completions after `:fleet ` are
+  the configured fleets, and `:fleet` alone leaves the fleet.
 - **`kscope get -o json` and `-o name`.** `-o json` prints a JSON array of
   `{context, namespace, name, status, age_seconds}` for `jq` and scripts,
   across a fleet as well (`kscope get pods -u stg -o json | jq`). `-o name`
