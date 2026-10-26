@@ -44,6 +44,25 @@ fn score(candidate: &str, query: &str) -> Option<Score> {
     None
 }
 
+/// `fleet <spec>` or `u <spec>`: the palette's one command besides picking a
+/// resource type. Returns the verb as typed and the spec, which is empty for
+/// a bare `fleet` (leave the fleet); `None` for anything else.
+pub fn fleet_command(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim();
+    let (verb, spec) = input
+        .split_once(char::is_whitespace)
+        .map_or((input, ""), |(verb, spec)| (verb, spec.trim()));
+    (verb.eq_ignore_ascii_case("fleet") || verb.eq_ignore_ascii_case("u")).then_some((verb, spec))
+}
+
+/// The verb, once a fleet command has a space after it: from then on the
+/// palette completes fleet names instead of resource types.
+pub fn completing_fleet(input: &str) -> Option<&str> {
+    let start = input.trim_start();
+    let (verb, _) = fleet_command(start)?;
+    (start.len() > verb.len()).then_some(verb)
+}
+
 /// One thing the palette can complete to.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -167,6 +186,26 @@ mod tests {
             query,
         );
         p.matches
+    }
+
+    #[test]
+    fn fleet_commands_are_recognised_and_resource_types_are_not() {
+        assert_eq!(fleet_command("fleet stg"), Some(("fleet", "stg")));
+        assert_eq!(
+            fleet_command(" u  stg-*,qa-eu "),
+            Some(("u", "stg-*,qa-eu"))
+        );
+        assert_eq!(fleet_command("fleet"), Some(("fleet", "")));
+        assert_eq!(fleet_command("Fleet prod"), Some(("Fleet", "prod")));
+        assert_eq!(fleet_command("fleetworkspaces"), None);
+        assert_eq!(fleet_command("deploy"), None);
+        assert_eq!(fleet_command(""), None);
+
+        // Names are completed only once the verb is followed by a space.
+        assert_eq!(completing_fleet("fleet"), None);
+        assert_eq!(completing_fleet("fleet "), Some("fleet"));
+        assert_eq!(completing_fleet("u st"), Some("u"));
+        assert_eq!(completing_fleet("pods"), None);
     }
 
     #[test]

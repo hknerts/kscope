@@ -386,4 +386,74 @@ mod tests {
         let members = vec![gone, down, member("c", deployment("shop:2", 1))];
         assert!(drift(&members).is_empty());
     }
+
+    fn paths(a: Value, b: Value, limit: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        differing_paths(&a, &b, "", &mut out, limit);
+        out
+    }
+
+    #[test]
+    fn differing_paths_name_missing_keys_and_resized_lists() {
+        assert_eq!(
+            paths(
+                json!({"a": 1, "b": [1, 2]}),
+                json!({"b": [1, 2, 3], "c": 0}),
+                10
+            ),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(
+            paths(
+                json!({"x": [{"y": 1}, {"y": 2}]}),
+                json!({"x": [{"y": 1}, {"y": 3}]}),
+                10
+            ),
+            vec!["x[1].y"]
+        );
+        assert_eq!(paths(json!(1), json!("1"), 10), vec!["(all of it)"]);
+        assert!(paths(json!({"a": 1}), json!({"a": 1}), 10).is_empty());
+    }
+
+    #[test]
+    fn differing_paths_stop_at_the_limit() {
+        let a = json!({"a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1});
+        let b = json!({"a": 2, "b": 2, "c": 2, "d": 2, "e": 2, "f": 2});
+        assert_eq!(paths(a, b, 4), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_secret_drifts_by_field_name_never_by_value() {
+        let secret = |v: &str| json!({"kind": "Secret", "data": {"PASSWORD": v}, "type": "Opaque"});
+        let members = vec![
+            member("a", secret("aHVudGVyMg==")),
+            member("b", secret("aHVudGVyMg==")),
+            member("c", secret("c3dvcmRmaXNo")),
+        ];
+        let d = drift(&members);
+        assert_eq!(d.spec, vec!["c"]);
+        assert_eq!(d.spec_fields, vec!["data.PASSWORD"]);
+        assert!(d.spec_fields.iter().all(|f| !f.contains("c3dvcmRmaXNo")));
+        assert!(facts(&secret("x")).images.is_empty());
+        assert_eq!(facts(&secret("x")).replicas, None);
+    }
+
+    #[test]
+    fn a_majority_beats_the_first_member() {
+        let members = vec![
+            member("one", deployment("shop:1", 1)),
+            member("two", deployment("shop:2", 1)),
+            member("three", deployment("shop:2", 1)),
+        ];
+        assert_eq!(drift(&members).images, vec!["one"]);
+        assert!(drift(&[]).is_empty());
+    }
+
+    #[test]
+    fn not_found_is_recognised_in_its_usual_spellings() {
+        assert!(is_not_found("404 page not found"));
+        assert!(is_not_found("NotFound"));
+        assert!(!is_not_found("forbidden: User cannot get resource"));
+        assert!(!is_not_found("connection refused"));
+    }
 }
