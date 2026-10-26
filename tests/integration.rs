@@ -13,11 +13,12 @@ fn line(text: &str) -> LogLine {
     LogLine::new(text.to_string(), Arc::from("ns/pod:container"))
 }
 
-/// The default: an unbounded buffer keeps every line of the session, so the
-/// first line a container ever emitted is still reachable after a large ingest.
+/// `buffer_lines = 0` opts into an unbounded buffer that keeps every line of
+/// the session, so the first line a container ever emitted is still reachable
+/// after a large ingest.
 #[test]
-fn default_buffer_retains_everything_from_the_first_line() {
-    let mut buffer = LogBuffer::new(0); // 0 == unlimited, the default
+fn unlimited_buffer_retains_everything_from_the_first_line() {
+    let mut buffer = LogBuffer::new(0); // 0 == unlimited
 
     for i in 0..250_000u32 {
         buffer.push(line(&format!("INFO handled request id={i}")));
@@ -32,6 +33,23 @@ fn default_buffer_retains_everything_from_the_first_line() {
     assert!(buffer.view_line(0).unwrap().raw.contains("id=0"));
     let first = Regex::new("id=0$").unwrap();
     assert_eq!(buffer.search_forward(0, &first), Some(0));
+}
+
+/// The default is a ring: a noisy pod cannot grow memory without limit, and
+/// what was evicted is counted.
+#[test]
+fn default_buffer_is_bounded() {
+    let config = Config::default();
+    let mut buffer = LogBuffer::new(config.logs.buffer_lines);
+    let cap = buffer.capacity().expect("the default must be bounded");
+    assert_eq!(cap, kscope::config::DEFAULT_BUFFER_LINES);
+
+    for i in 0..cap + 1_000 {
+        buffer.push(line(&format!("INFO handled request id={i}")));
+    }
+    assert_eq!(buffer.len(), cap);
+    assert_eq!(buffer.dropped, 1_000);
+    assert!(buffer.view_line(0).unwrap().raw.ends_with("id=1000"));
 }
 
 /// An explicit cap still behaves as a ring buffer: 200 000 lines through a

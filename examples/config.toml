@@ -32,10 +32,11 @@ allow_reveal = true
 # qa = ["qa-*"]
 
 [logs]
-# Lines kept in memory. 0 (the default) means unlimited: nothing is ever
-# evicted, so you can always scroll back to the first line of the session.
-# Set a positive value to turn this into a ring buffer with a memory ceiling.
-buffer_lines = 0
+# Lines kept in memory, as a ring buffer that evicts the oldest (the log pane
+# says how many). 50000 is about 12 MiB at a typical 200-byte line. 0 means
+# unlimited: nothing is ever evicted, so you can always scroll back to the
+# first line of the session, but memory grows with it.
+buffer_lines = 50000
 # History requested when attaching. 0 (the default) means everything the API
 # server still has, i.e. from the moment the container started.
 tail_lines = 0

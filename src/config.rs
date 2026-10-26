@@ -19,6 +19,13 @@ pub const DEFAULT_FLEETS: &[(&str, &[&str])] = &[
 /// `KSCOPE_FLEET_STG="stg-eu-*,qa-eu"` defines (or overrides) fleet `stg`.
 pub const FLEET_ENV_PREFIX: &str = "KSCOPE_FLEET_";
 
+/// Default `logs.buffer_lines`. At a typical 200 bytes a line that is 10 MiB
+/// of text (about 12 MiB resident): one kubelet log file at the default
+/// `containerLogMaxSize`, and ten times k9s's 5 000 lines. A noisy pod or a
+/// fleet-wide merge then has a memory ceiling; `0` still opts into keeping
+/// everything.
+pub const DEFAULT_BUFFER_LINES: usize = 50_000;
+
 /// Root configuration object.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -68,10 +75,10 @@ impl Default for General {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogsConfig {
-    /// Maximum number of lines kept in memory. **`0` means unlimited**, which
-    /// is the default: nothing is ever dropped, so you can always scroll back
-    /// to the first line of the session. Set a positive value to turn the
-    /// buffer into a ring that evicts the oldest lines instead.
+    /// Maximum number of lines kept in memory, as a ring that evicts the
+    /// oldest lines ([`DEFAULT_BUFFER_LINES`] by default). **`0` means
+    /// unlimited**: nothing is ever dropped, so you can always scroll back to
+    /// the first line of the session, at the cost of a memory ceiling.
     pub buffer_lines: usize,
     /// How many historical lines to request when attaching to a container.
     /// **`0` means "everything the API server still has"**, i.e. from the
@@ -103,7 +110,7 @@ pub struct LogsConfig {
 impl Default for LogsConfig {
     fn default() -> Self {
         Self {
-            buffer_lines: 0,
+            buffer_lines: DEFAULT_BUFFER_LINES,
             tail_lines: 0,
             since_seconds: None,
             timestamps: false,
@@ -362,8 +369,8 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let c = Config::default();
-        // 0 == unlimited on both: full history, nothing evicted.
-        assert_eq!(c.logs.buffer_lines, 0);
+        // A ring with a memory ceiling, filled from the full history.
+        assert_eq!(c.logs.buffer_lines, DEFAULT_BUFFER_LINES);
         assert_eq!(c.logs.tail_lines, 0);
         assert!(c.metrics.refresh_ms >= 1000);
         assert!(c.general.max_fps > 0);
@@ -395,6 +402,9 @@ mod tests {
     fn parses_partial_config() {
         let c: Config = toml::from_str("[logs]\nbuffer_lines = 10\n").unwrap();
         assert_eq!(c.logs.buffer_lines, 10);
+        // An explicit 0 still means unlimited, as it always has.
+        let c: Config = toml::from_str("[logs]\nbuffer_lines = 0\n").unwrap();
+        assert_eq!(c.logs.buffer_lines, 0);
         // untouched section keeps its default
         assert_eq!(c.metrics.history, MetricsConfig::default().history);
     }
